@@ -6,7 +6,8 @@ import net.ghoula.melian.RequestError
 
 /** Compiled router that dispatches HTTP requests via a segment trie.
   *
-  * Produces a handler function compatible with eru-http's RequestHandler type.
+  * Produces a handler function compatible with eru-http's RequestHandler type. RequestErrors from
+  * the Girdle pipeline are rendered as 400 Bad Request responses with RFC 9457 problem details.
   */
 final class Router private[router] (private val trie: RouteTrie) {
 
@@ -21,12 +22,17 @@ final class Router private[router] (private val trie: RouteTrie) {
         }
 
       case RouteTrie.LookupResult.Matched(entry, pathParams) =>
-        entry.handler(request, pathParams).mapError {
+        entry.handler(request, pathParams).recoverWith {
+          case e: RequestError => Eru.succeed(renderRequestError(e))
+        }.mapError {
           case e: HttpError => e
-          case e: RequestError => HttpError.ProtocolError(e.toString, "RFC 9457")
+          case e => HttpError.ProtocolError(e.toString, "unexpected")
         }
     }
   }
+
+  private def renderRequestError(error: RequestError): Response[Body] =
+    Response.badRequest(Body.text(error.toString, MediaType.applicationJson))
 }
 
 object Router {

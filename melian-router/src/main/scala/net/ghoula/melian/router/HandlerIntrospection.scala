@@ -4,9 +4,8 @@ import scala.quoted.*
 
 /** Compile-time introspection of handler function types.
   *
-  * Decomposes a handler's TypeRepr to classify each parameter by its marker type (Path, Query,
-  * Header, Json, Coded, Form) and extracts the return type structure (Endpoint[E, R] where R is
-  * Ok[A], Created[A], NoContent, etc.).
+  * Decomposes a handler's TypeRepr to classify each parameter by its marker type and extracts the
+  * return type structure (Eru[E, ResponseWrapper[A]]).
   */
 object HandlerIntrospection {
 
@@ -20,21 +19,35 @@ object HandlerIntrospection {
     case Unknown
   }
 
-  case class ParamInfo(name: String, kind: ParamKind, innerType: String) derives CanEqual
-  case class ResponseInfo(errorType: String, wrapperType: String, bodyType: Option[String])
+  /** Compile-time info about a single handler parameter, carrying the actual TypeRepr. */
+  case class ParamInfo(
+    index: Int,
+    kind: ParamKind,
+    markerTypeRepr: Any,
+    innerTypeRepr: Any,
+    innerTypeShow: String
+  )
+
+  /** Compile-time info about the handler's response type. */
+  case class ResponseInfo(
+    errorTypeRepr: Any,
+    wrapperName: String,
+    bodyTypeRepr: Option[Any],
+    bodyTypeShow: Option[String]
+  )
 
   case class HandlerInfo(
     params: List[ParamInfo],
     response: ResponseInfo,
-    hasBody: Boolean
+    paramCount: Int
   ) {
-    def pathParams: List[ParamInfo] = params.collect { case p if p.kind == ParamKind.PathParam => p }
-    def queryParams: List[ParamInfo] = params.collect { case p if p.kind == ParamKind.QueryParam => p }
-    def headerParams: List[ParamInfo] = params.collect { case p if p.kind == ParamKind.HeaderParam => p }
-    def bodyParams: List[ParamInfo] = params.collect {
-      case p if p.kind == ParamKind.JsonBody => p
-      case p if p.kind == ParamKind.CodedBody => p
-      case p if p.kind == ParamKind.FormBody => p
+    def pathParams: List[ParamInfo] = params.filter(_.kind == ParamKind.PathParam)
+
+    def hasBody: Boolean = params.exists { p =>
+      p.kind match {
+        case ParamKind.JsonBody | ParamKind.CodedBody | ParamKind.FormBody => true
+        case _ => false
+      }
     }
   }
 
@@ -53,32 +66,25 @@ object HandlerIntrospection {
     import q.reflect.*
 
     val handlerType = TypeRepr.of[H].dealias
-    val (paramTypes, paramNames, returnType) = decomposeFunction(handlerType)
+    val (paramTypes, returnType) = decomposeFunction(handlerType)
 
-    val params = paramTypes.zip(paramNames).map { case (tpe, name) =>
-      classifyParam(tpe, name)
+    val params = paramTypes.zipWithIndex.map { case (tpe, idx) =>
+      classifyParam(tpe, idx)
     }
 
     val response = classifyResponse(returnType)
-    val hasBody = params.exists { p =>
-      p.kind match {
-        case ParamKind.JsonBody | ParamKind.CodedBody | ParamKind.FormBody => true
-        case _ => false
-      }
-    }
-
-    HandlerInfo(params, response, hasBody)
+    HandlerInfo(params, response, paramTypes.size)
   }
 
-  private def decomposeFunction(using q: Quotes)(tpe: q.reflect.TypeRepr): (List[q.reflect.TypeRepr], List[String], q.reflect.TypeRepr) = {
+  /** Returns (paramTypes, returnType) from a FunctionN type. */
+  def decomposeFunction(using q: Quotes)(
+    tpe: q.reflect.TypeRepr
+  ): (List[q.reflect.TypeRepr], q.reflect.TypeRepr) = {
     import q.reflect.*
 
     tpe.dealias match {
       case AppliedType(fn, args) if fn.typeSymbol.fullName.startsWith("scala.Function") =>
-        val paramTypes = args.init
-        val returnType = args.last
-        val paramNames = paramTypes.zipWithIndex.map { case (_, i) => s"arg$i" }
-        (paramTypes, paramNames, returnType)
+        (args.init, args.last)
       case other =>
         report.errorAndAbort(
           s"Handler must be a function type, got: ${other.show}\n\n" +
@@ -87,7 +93,7 @@ object HandlerIntrospection {
     }
   }
 
-  private def classifyParam(using q: Quotes)(tpe: q.reflect.TypeRepr, name: String): ParamInfo = {
+  private def classifyParam(using q: Quotes)(tpe: q.reflect.TypeRepr, index: Int): ParamInfo = {
     import q.reflect.*
 
     tpe match {
@@ -97,9 +103,9 @@ object HandlerIntrospection {
         val kind =
           if fullName.startsWith(melianPackage) then markerSuffixes.getOrElse(simpleName, ParamKind.Unknown)
           else ParamKind.Unknown
-        ParamInfo(name, kind, inner.show)
+        ParamInfo(index, kind, tpe, inner, inner.show)
       case _ =>
-        ParamInfo(name, ParamKind.Unknown, tpe.show)
+        ParamInfo(index, ParamKind.Unknown, tpe, tpe, tpe.show)
     }
   }
 
@@ -111,12 +117,12 @@ object HandlerIntrospection {
       case AppliedType(eru, List(errorType, responseType)) if eru.typeSymbol.fullName == "net.ghoula.eru.Eru" =>
         responseType.dealias match {
           case AppliedType(wrapper, List(body)) =>
-            ResponseInfo(errorType.show, wrapper.typeSymbol.name, Some(body.show))
+            ResponseInfo(errorType, wrapper.typeSymbol.name, Some(body), Some(body.show))
           case terminal =>
-            ResponseInfo(errorType.show, terminal.typeSymbol.name, None)
+            ResponseInfo(errorType, terminal.typeSymbol.name, None, None)
         }
       case other =>
-        ResponseInfo("Nothing", other.show, None)
+        ResponseInfo(TypeRepr.of[Nothing], other.show, None, None)
     }
   }
 

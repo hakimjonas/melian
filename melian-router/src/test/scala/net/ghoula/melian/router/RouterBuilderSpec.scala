@@ -4,8 +4,9 @@ import munit.FunSuite
 import net.ghoula.eru.Eru
 import net.ghoula.eru.http.*
 import net.ghoula.melian.*
+import net.ghoula.melian.extraction.FromHeader.BearerToken
 import net.ghoula.sarati.ast.json.JsonValue
-import net.ghoula.sarati.codec.Encoder
+import net.ghoula.sarati.codec.{Decoder, Encoder}
 
 import java.util.UUID
 
@@ -15,7 +16,39 @@ class RouterBuilderSpec extends FunSuite {
     def encode(value: String): JsonValue = JsonValue.Str(value)
   }
 
-  private def runHandler(handler: Request[Body] => Eru[HttpError, Response[Body]], request: Request[Body]): Response[Body] =
+  case class CreateCommand(name: String)
+  case class Workspace(id: UUID, name: String)
+
+  given Decoder[JsonValue, CreateCommand] with {
+    def decode(value: JsonValue): net.ghoula.sarati.Result[net.ghoula.sarati.DecodeError, CreateCommand] =
+      value match {
+        case JsonValue.Object(fields) =>
+          fields.get("name") match {
+            case Some(JsonValue.Str(n)) =>
+              net.ghoula.sarati.Result.Success(CreateCommand(n), 0)
+            case _ =>
+              net.ghoula.sarati.Result.Failure(
+                List(net.ghoula.sarati.DecodeError.MissingField("name", (line = 1, column = 1, offset = 0))),
+                (line = 1, column = 1, offset = 0))
+          }
+        case _ =>
+          net.ghoula.sarati.Result.Failure(
+            List(net.ghoula.sarati.DecodeError.TypeMismatch("Object", "other", (line = 1, column = 1, offset = 0))),
+            (line = 1, column = 1, offset = 0))
+      }
+  }
+
+  given Encoder[Workspace, JsonValue] with {
+    def encode(value: Workspace): JsonValue = JsonValue.Object(Map(
+      "id" -> JsonValue.Str(value.id.toString),
+      "name" -> JsonValue.Str(value.name)
+    ))
+  }
+
+  import SaratiBridge.given
+
+  /** Run a full request through the handler at the edge. */
+  private def run(handler: Request[Body] => Eru[HttpError, Response[Body]], request: Request[Body]): Response[Body] =
     handler(request).unsafeRunSync()
 
   private def bodyText(response: Response[Body]): String = response.body match {
@@ -23,45 +56,39 @@ class RouterBuilderSpec extends FunSuite {
     case other => fail(s"Expected Text body, got: $other"); ""
   }
 
-  test("GET with path param extracts UUID and returns JSON response") {
+  private def requestWith(
+    method: Method,
+    path: String,
+    body: Body = Body.empty,
+    headerPairs: List[(String, String)] = Nil
+  ): Request[Body] = {
+    val base = Request(method = method, uri = Uri.http("localhost", path = path), headers = Headers.empty, body = body)
+    headerPairs.foldLeft[Eru[Any, Request[Body]]](Eru.succeed(base)) { case (acc, (name, value)) =>
+      acc.flatMap(_.addHeader(name, value))
+    }.unsafeRunSync()
+  }
+
+  // --- Phase 2: GET + Path ---
+
+  test("GET with path param extracts UUID and returns JSON") {
     val handler: Path[UUID] => Eru[Nothing, Ok[String]] =
       (id: Path[UUID]) => Eru.succeed(Ok(s"user-${id.value}"))
 
-    val router = Router.builder
-      .get("/users/:id", handler)
-      .build
-      .getOrElse(fail("Router build failed"))
-
+    val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
     val testId = "550e8400-e29b-41d4-a716-446655440000"
-    val request = Request(
-      method = Method.GET,
-      uri = Uri.http("localhost", path = s"/users/$testId"),
-      headers = Headers.empty,
-      body = Body.empty
-    )
+    val response = run(router.toHandler, requestWith(Method.GET, s"/users/$testId"))
 
-    val response = runHandler(router.toHandler, request)
     assertEquals(response.status, StatusCode.Ok)
-    assert(bodyText(response).contains(s"user-$testId"), s"Body was: ${bodyText(response)}")
+    assert(bodyText(response).contains(s"user-$testId"))
   }
 
   test("GET to unknown path returns 404") {
     val handler: Path[UUID] => Eru[Nothing, Ok[String]] =
       (id: Path[UUID]) => Eru.succeed(Ok(s"user-${id.value}"))
 
-    val router = Router.builder
-      .get("/users/:id", handler)
-      .build
-      .getOrElse(fail("Router build failed"))
+    val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWith(Method.GET, "/unknown"))
 
-    val request = Request(
-      method = Method.GET,
-      uri = Uri.http("localhost", path = "/unknown"),
-      headers = Headers.empty,
-      body = Body.empty
-    )
-
-    val response = runHandler(router.toHandler, request)
     assertEquals(response.status, StatusCode.NotFound)
   }
 
@@ -69,19 +96,9 @@ class RouterBuilderSpec extends FunSuite {
     val handler: Path[UUID] => Eru[Nothing, Ok[String]] =
       (id: Path[UUID]) => Eru.succeed(Ok(s"user-${id.value}"))
 
-    val router = Router.builder
-      .get("/users/:id", handler)
-      .build
-      .getOrElse(fail("Router build failed"))
+    val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWith(Method.POST, "/users/550e8400-e29b-41d4-a716-446655440000"))
 
-    val request = Request(
-      method = Method.POST,
-      uri = Uri.http("localhost", path = "/users/550e8400-e29b-41d4-a716-446655440000"),
-      headers = Headers.empty,
-      body = Body.empty
-    )
-
-    val response = runHandler(router.toHandler, request)
     assertEquals(response.status, StatusCode.MethodNotAllowed)
   }
 
@@ -95,27 +112,62 @@ class RouterBuilderSpec extends FunSuite {
     val router = Router.builder
       .get("/users/:id", getUser)
       .get("/items/:id", getItem)
-      .build
-      .getOrElse(fail("Router build failed"))
+      .build.getOrElse(fail("build failed"))
 
-    val userRequest = Request(
-      method = Method.GET,
-      uri = Uri.http("localhost", path = "/users/550e8400-e29b-41d4-a716-446655440000"),
-      headers = Headers.empty,
-      body = Body.empty
-    )
+    val userBody = bodyText(run(router.toHandler, requestWith(Method.GET, "/users/550e8400-e29b-41d4-a716-446655440000")))
+    val itemBody = bodyText(run(router.toHandler, requestWith(Method.GET, "/items/42")))
 
-    val itemRequest = Request(
-      method = Method.GET,
-      uri = Uri.http("localhost", path = "/items/42"),
-      headers = Headers.empty,
-      body = Body.empty
-    )
+    assert(userBody.contains("get-550e8400"))
+    assert(itemBody.contains("item-42"))
+  }
 
-    val userBody = bodyText(runHandler(router.toHandler, userRequest))
-    val itemBody = bodyText(runHandler(router.toHandler, itemRequest))
+  // --- Phase 3: POST + Path + Header + Json ---
 
-    assert(userBody.contains("get-550e8400"), s"User body: $userBody")
-    assert(itemBody.contains("item-42"), s"Item body: $itemBody")
+  test("POST with path param, header, and JSON body") {
+    val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
+      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id.value, cmd.value.name))) }
+
+    val testId = "550e8400-e29b-41d4-a716-446655440000"
+    val router = Router.builder.post("/workspaces/:id", handler).build.getOrElse(fail("build failed"))
+
+    val response = run(router.toHandler, requestWith(
+      Method.POST, s"/workspaces/$testId",
+      body = Body.text("""{"name":"My Workspace"}""", MediaType.applicationJson),
+      headerPairs = List("Authorization" -> "Bearer test-token-123")
+    ))
+
+    assertEquals(response.status, StatusCode.Ok)
+    val body = bodyText(response)
+    assert(body.contains(testId), s"Missing ID: $body")
+    assert(body.contains("My Workspace"), s"Missing name: $body")
+  }
+
+  test("POST with missing Authorization header returns error") {
+    val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
+      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id.value, cmd.value.name))) }
+
+    val router = Router.builder.post("/workspaces/:id", handler).build.getOrElse(fail("build failed"))
+
+    val response = run(router.toHandler, requestWith(
+      Method.POST, "/workspaces/550e8400-e29b-41d4-a716-446655440000",
+      body = Body.text("""{"name":"test"}""", MediaType.applicationJson)
+    ))
+
+    assert(response.status.value >= 400, s"Expected error, got: ${response.status}")
+  }
+
+  test("POST with malformed JSON body returns error") {
+    val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
+      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id.value, cmd.value.name))) }
+
+    val router = Router.builder.post("/workspaces/:id", handler).build.getOrElse(fail("build failed"))
+
+    val response = run(router.toHandler, requestWith(
+      Method.POST, "/workspaces/550e8400-e29b-41d4-a716-446655440000",
+      body = Body.text("not json", MediaType.applicationJson),
+      headerPairs = List("Authorization" -> "Bearer token")
+    ))
+
+    assert(response.status.value >= 400, s"Expected error, got: ${response.status}")
   }
 }
