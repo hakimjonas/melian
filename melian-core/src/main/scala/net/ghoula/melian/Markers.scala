@@ -2,52 +2,23 @@ package net.ghoula.melian
 
 /** Source markers for endpoint parameters.
   *
-  * Opaque types that instruct the compile-time extractor where to source each parameter. At runtime
-  * these erase to A — zero allocation, zero overhead. At compile time the macro inspects parameter
-  * types via TypeRepr to determine the extraction strategy.
+  * Transparent type aliases that instruct the compile-time macro where to source each parameter.
+  * At compile time the macro inspects TypeRepr to find these markers and determine extraction
+  * strategy. At runtime they are identity — Path[UUID] IS UUID, no wrapping or unwrapping.
+  *
+  * This eliminates asInstanceOf at the handler call boundary: the macro extracts a UUID, and the
+  * handler receives a UUID directly (since Path[UUID] = UUID).
   */
 
-opaque type Path[A] = A
-
-object Path {
-  def apply[A](value: A): Path[A] = value
-  extension [A](p: Path[A]) { def value: A = p }
-}
-
-opaque type Query[A] = A
-
-object Query {
-  def apply[A](value: A): Query[A] = value
-  extension [A](q: Query[A]) { def value: A = q }
-}
-
-opaque type Header[A] = A
-
-object Header {
-  def apply[A](value: A): Header[A] = value
-  extension [A](h: Header[A]) { def value: A = h }
-}
+type Path[A] = A
+type Query[A] = A
+type Header[A] = A
 
 /** Body decoded via Rumil JSON parse -> Sarati decode -> Valar validate. JSON only. */
-opaque type Json[A] = A
-
-object Json {
-  def apply[A](value: A): Json[A] = value
-  extension [A](j: Json[A]) { def value: A = j }
-}
+type Json[A] = A
 
 /** Body decoded via Rumil -> Sarati -> Valar pipeline with Content-Type dispatch. */
-opaque type Coded[A] = A
-
-object Coded {
-  def apply[A](value: A): Coded[A] = value
-  extension [A](c: Coded[A]) { def value: A = c }
-}
+type Coded[A] = A
 
 /** Body decoded from form-urlencoded data -> Valar validate. */
-opaque type Form[A] = A
-
-object Form {
-  def apply[A](value: A): Form[A] = value
-  extension [A](f: Form[A]) { def value: A = f }
-}
+type Form[A] = A

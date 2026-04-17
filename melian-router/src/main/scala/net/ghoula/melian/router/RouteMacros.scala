@@ -266,7 +266,7 @@ object RouteMacros {
           method, pathStr, paramName, s"FromPathSegment[${Type.show[a]}]")
         '{ $fps.parse($pathParams.getOrElse($nameExpr, ""), $nameExpr).mapError { err =>
             net.ghoula.melian.RequestError.ExtractionFailed(Vector(err)): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError
-          }.map(v => net.ghoula.melian.Path(v): Any)
+          }.map(v => v: Any)
         }
     }
   }
@@ -288,7 +288,7 @@ object RouteMacros {
             case Some(hv) =>
               $fh.parse(hv.value).mapError { err =>
                 net.ghoula.melian.RequestError.ExtractionFailed(Vector(err)): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError
-              }.map(v => net.ghoula.melian.Header(v): Any)
+              }.map(v => v: Any)
             case None =>
               net.ghoula.eru.Eru.fail(net.ghoula.melian.RequestError.ExtractionFailed(Vector(
                 net.ghoula.melian.ExtractionError(net.ghoula.melian.ExtractionSource.Header, headerName,
@@ -316,7 +316,7 @@ object RouteMacros {
           }.flatMap { _ =>
             $bd.decode($request.body).mapError { err =>
               net.ghoula.melian.RequestError.DecodeFailed(List(err.message)): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError
-            }.map(v => net.ghoula.melian.Json(v): Any)
+            }.map(v => v: Any)
           }
         }
     }

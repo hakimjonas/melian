@@ -72,7 +72,7 @@ class RouterBuilderSpec extends FunSuite {
 
   test("GET with path param extracts UUID and returns JSON") {
     val handler: Path[UUID] => Eru[Nothing, Ok[String]] =
-      (id: Path[UUID]) => Eru.succeed(Ok(s"user-${id.value}"))
+      (id: Path[UUID]) => Eru.succeed(Ok(s"user-${id}"))
 
     val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
     val testId = "550e8400-e29b-41d4-a716-446655440000"
@@ -84,7 +84,7 @@ class RouterBuilderSpec extends FunSuite {
 
   test("GET to unknown path returns 404") {
     val handler: Path[UUID] => Eru[Nothing, Ok[String]] =
-      (id: Path[UUID]) => Eru.succeed(Ok(s"user-${id.value}"))
+      (id: Path[UUID]) => Eru.succeed(Ok(s"user-${id}"))
 
     val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
     val response = run(router.toHandler, requestWith(Method.GET, "/unknown"))
@@ -94,7 +94,7 @@ class RouterBuilderSpec extends FunSuite {
 
   test("POST to GET-only route returns 405") {
     val handler: Path[UUID] => Eru[Nothing, Ok[String]] =
-      (id: Path[UUID]) => Eru.succeed(Ok(s"user-${id.value}"))
+      (id: Path[UUID]) => Eru.succeed(Ok(s"user-${id}"))
 
     val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
     val response = run(router.toHandler, requestWith(Method.POST, "/users/550e8400-e29b-41d4-a716-446655440000"))
@@ -104,10 +104,10 @@ class RouterBuilderSpec extends FunSuite {
 
   test("multiple routes dispatch correctly") {
     val getUser: Path[UUID] => Eru[Nothing, Ok[String]] =
-      (id: Path[UUID]) => Eru.succeed(Ok(s"get-${id.value}"))
+      (id: Path[UUID]) => Eru.succeed(Ok(s"get-${id}"))
 
     val getItem: Path[Int] => Eru[Nothing, Ok[String]] =
-      (id: Path[Int]) => Eru.succeed(Ok(s"item-${id.value}"))
+      (id: Path[Int]) => Eru.succeed(Ok(s"item-${id}"))
 
     val router = Router.builder
       .get("/users/:id", getUser)
@@ -125,7 +125,7 @@ class RouterBuilderSpec extends FunSuite {
 
   test("POST with path param, header, and JSON body") {
     val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
-      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id.value, cmd.value.name))) }
+      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id, cmd.name))) }
 
     val testId = "550e8400-e29b-41d4-a716-446655440000"
     val router = Router.builder.post("/workspaces/:id", handler).build.getOrElse(fail("build failed"))
@@ -144,7 +144,7 @@ class RouterBuilderSpec extends FunSuite {
 
   test("POST with missing Authorization header returns error") {
     val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
-      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id.value, cmd.value.name))) }
+      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id, cmd.name))) }
 
     val router = Router.builder.post("/workspaces/:id", handler).build.getOrElse(fail("build failed"))
 
@@ -158,7 +158,7 @@ class RouterBuilderSpec extends FunSuite {
 
   test("POST with malformed JSON body returns error") {
     val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
-      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id.value, cmd.value.name))) }
+      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id, cmd.name))) }
 
     val router = Router.builder.post("/workspaces/:id", handler).build.getOrElse(fail("build failed"))
 
@@ -177,7 +177,7 @@ class RouterBuilderSpec extends FunSuite {
     val handler: Path[UUID] => Endpoint[Nothing, Ok[String]] =
       (id: Path[UUID]) => {
         val ctx = summon[RequestContext]
-        Eru.succeed(Ok(s"${id.value}:${ctx.requestId}"))
+        Eru.succeed(Ok(s"${id}:${ctx.requestId}"))
       }
 
     val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
@@ -192,7 +192,7 @@ class RouterBuilderSpec extends FunSuite {
 
   test("POST with missing header AND malformed body accumulates both errors") {
     val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
-      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id.value, cmd.value.name))) }
+      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id, cmd.name))) }
 
     val router = Router.builder.post("/workspaces/:id", handler).build.getOrElse(fail("build failed"))
 
