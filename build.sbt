@@ -68,11 +68,8 @@ val sharedScalacOptions: Seq[String] = Seq(
   "-Wsafe-init",
   "-Wunused:all",
   "-Wvalue-discard",
-  "-Wconf:id=E198:s",
-  "-explain",
-  "-no-indent",
-  "-new-syntax",
-  "-source:future"
+  "-Wrecurse-with-default",
+  "-no-indent"
 )
 
 // ===== Dependency Versions =====

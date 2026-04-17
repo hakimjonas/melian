@@ -1,0 +1,38 @@
+package net.ghoula.melian.router
+
+import net.ghoula.eru.Eru
+import net.ghoula.eru.http.*
+import net.ghoula.melian.RequestError
+
+/** Compiled router that dispatches HTTP requests via a segment trie.
+  *
+  * Produces a handler function compatible with eru-http's RequestHandler type.
+  */
+final class Router private[router] (private val trie: RouteTrie) {
+
+  def toHandler: Request[Body] => Eru[HttpError, Response[Body]] = { (request: Request[Body]) =>
+    trie.lookup(request.uri.path, request.method) match {
+      case RouteTrie.LookupResult.NotFound =>
+        Eru.succeed(Response.notFound(Body.text(s"Not Found: ${request.uri.path}")))
+
+      case RouteTrie.LookupResult.MethodNotAllowed(allowed) =>
+        Response.methodNotAllowed(allowed).mapError { e =>
+          HttpError.InvalidResponse(InvalidResponse(e.toString, "RFC 9110 Section 15.5.6"))
+        }
+
+      case RouteTrie.LookupResult.Matched(entry, pathParams) =>
+        entry.handler(request, pathParams).mapError {
+          case e: HttpError => e
+          case e: RequestError => HttpError.ProtocolError(e.toString, "RFC 9457")
+        }
+    }
+  }
+}
+
+object Router {
+
+  def builder: RouterBuilder = RouterBuilder()
+
+  def fromRoutes(routes: Vector[RouteEntry]): Either[String, Router] =
+    RouteTrie.build(routes).map(trie => new Router(trie))
+}
