@@ -194,40 +194,76 @@ object RouteMacros {
     }
   }
 
-  // --- Handler call with nested flatMap ---
-  // The handler.asInstanceOf is safe: opaque types (Path[A], Header[A], Json[A]) erase to A at runtime,
-  // and we call the function with exactly the values it expects.
+  // --- Handler call with error-accumulating extraction ---
+  // Uses Eru.attempt to run ALL extractions independently, then combines errors or calls handler.
+  // The handler.asInstanceOf is safe: opaque types erase at runtime.
 
   private def nestAndCall[H: Type, B: Type](using q: Quotes)(
     handler: Expr[H],
     extractions: List[Expr[MEru[Any]]],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]]
   ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
-    val call: Expr[List[Any] => MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] =
-      '{ (args: List[Any]) =>
-        val result = args.size match {
-          case 1 => $handler.asInstanceOf[Any => net.ghoula.eru.Eru[Any, Any]].apply(args(0))
-          case 2 => $handler.asInstanceOf[(Any, Any) => net.ghoula.eru.Eru[Any, Any]].apply(args(0), args(1))
-          case 3 => $handler.asInstanceOf[(Any, Any, Any) => net.ghoula.eru.Eru[Any, Any]].apply(args(0), args(1), args(2))
-          case 4 => $handler.asInstanceOf[(Any, Any, Any, Any) => net.ghoula.eru.Eru[Any, Any]].apply(args(0), args(1), args(2), args(3))
-          case _ => net.ghoula.eru.Eru.fail(net.ghoula.eru.http.HttpError.ProtocolError("Unsupported arity", "internal"))
-        }
-        result.mapError { err =>
-          net.ghoula.eru.http.HttpError.ProtocolError(err.toString, "domain"): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError
-        }.flatMap(resp => encodeResponse(resp, $bodyEncoder.asInstanceOf[net.ghoula.eru.http.BodyEncoder[Any]]))
-      }
-
-    // Chain: e1.flatMap(a1 => e2.flatMap(a2 => ... call(List(a1, a2, ...))))
-    extractions.foldRight[Expr[List[Any] => MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]]](call) {
-      (extraction, continuation) =>
-        '{ (prevArgs: List[Any]) =>
-          $extraction.flatMap { (extracted: Any) =>
-            $continuation(prevArgs :+ extracted)
-          }
-        }
-    } match {
-      case chain => '{ $chain(List.empty[Any]) }
+    val extractionExprs = Expr.ofList(extractions)
+    '{
+      accumulateAndCall($extractionExprs, $handler, $bodyEncoder.asInstanceOf[net.ghoula.eru.http.BodyEncoder[Any]])
     }
+  }
+
+  // Runtime: runs all extractions via attempt, accumulates errors, then calls handler or fails.
+  private def accumulateAndCall[H](
+    extractions: List[net.ghoula.eru.Eru[net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError, Any]],
+    handler: H,
+    encoder: net.ghoula.eru.http.BodyEncoder[Any]
+  ): net.ghoula.eru.Eru[net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
+    import net.ghoula.eru.Eru
+    import net.ghoula.eru.{Result as EruResult}
+
+    // Run all extractions, converting failures to values via attempt
+    val attempted: List[Eru[Nothing, EruResult[net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError, Any]]] =
+      extractions.map(_.attempt)
+
+    // Sequence the attempts (they never fail, so flatMap is fine here)
+    sequenceEru(attempted).flatMap { results =>
+      // Partition into successes and failures
+      val values = results.collect { case EruResult.Success(v) => v }
+      val errors = results.collect { case EruResult.Failure(e) => e }
+
+      if errors.nonEmpty then {
+        // Accumulate all extraction errors into a single ExtractionFailed
+        val allExtractionErrors = errors.flatMap {
+          case net.ghoula.melian.RequestError.ExtractionFailed(errs) => errs.toList
+          case other => List(net.ghoula.melian.ExtractionError(
+            net.ghoula.melian.ExtractionSource.Path, "unknown", other.toString, None, None))
+        }.toVector
+        Eru.fail(net.ghoula.melian.RequestError.ExtractionFailed(allExtractionErrors): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError)
+      } else {
+        // All succeeded — call handler
+        callHandler(handler, values, encoder)
+      }
+    }
+  }
+
+  private def sequenceEru[A](effects: List[net.ghoula.eru.Eru[Nothing, A]]): net.ghoula.eru.Eru[Nothing, List[A]] =
+    effects.foldRight(net.ghoula.eru.Eru.succeed(List.empty[A])) { (effect, acc) =>
+      effect.flatMap(a => acc.map(rest => a :: rest))
+    }
+
+  private def callHandler[H](
+    handler: H,
+    args: List[Any],
+    encoder: net.ghoula.eru.http.BodyEncoder[Any]
+  ): net.ghoula.eru.Eru[net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
+    import net.ghoula.eru.Eru
+    val result = args.size match {
+      case 1 => handler.asInstanceOf[Any => Eru[Any, Any]].apply(args(0))
+      case 2 => handler.asInstanceOf[(Any, Any) => Eru[Any, Any]].apply(args(0), args(1))
+      case 3 => handler.asInstanceOf[(Any, Any, Any) => Eru[Any, Any]].apply(args(0), args(1), args(2))
+      case 4 => handler.asInstanceOf[(Any, Any, Any, Any) => Eru[Any, Any]].apply(args(0), args(1), args(2), args(3))
+      case n => Eru.fail(net.ghoula.eru.http.HttpError.ProtocolError(s"Unsupported handler arity: $n", "internal"))
+    }
+    result.mapError { err =>
+      net.ghoula.eru.http.HttpError.ProtocolError(err.toString, "domain"): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError
+    }.flatMap(resp => encodeResponse(resp, encoder))
   }
 
   // --- Response encoding ---

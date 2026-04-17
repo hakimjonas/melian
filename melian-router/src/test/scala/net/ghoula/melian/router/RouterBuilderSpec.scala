@@ -170,4 +170,21 @@ class RouterBuilderSpec extends FunSuite {
 
     assert(response.status.value >= 400, s"Expected error, got: ${response.status}")
   }
+
+  test("POST with missing header AND malformed body accumulates both errors") {
+    val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
+      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id.value, cmd.value.name))) }
+
+    val router = Router.builder.post("/workspaces/:id", handler).build.getOrElse(fail("build failed"))
+
+    val response = run(router.toHandler, requestWith(
+      Method.POST, "/workspaces/550e8400-e29b-41d4-a716-446655440000",
+      body = Body.text("not json", MediaType.applicationJson)
+    ))
+
+    assertEquals(response.status, StatusCode.BadRequest)
+    val body = bodyText(response)
+    assert(body.contains("Authorization") || body.contains("header"), s"Should mention missing header: $body")
+    assert(body.contains("parse") || body.contains("Decode") || body.contains("decode"), s"Should mention body error: $body")
+  }
 }
