@@ -171,6 +171,25 @@ class RouterBuilderSpec extends FunSuite {
     assert(response.status.value >= 400, s"Expected error, got: ${response.status}")
   }
 
+  // --- Endpoint (context function) tests ---
+
+  test("handler returning Endpoint gets RequestContext with requestId") {
+    val handler: Path[UUID] => Endpoint[Nothing, Ok[String]] =
+      (id: Path[UUID]) => {
+        val ctx = summon[RequestContext]
+        Eru.succeed(Ok(s"${id.value}:${ctx.requestId}"))
+      }
+
+    val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWith(Method.GET, "/users/550e8400-e29b-41d4-a716-446655440000"))
+
+    assertEquals(response.status, StatusCode.Ok)
+    val body = bodyText(response)
+    assert(body.contains("550e8400"), s"Missing user ID: $body")
+    // requestId is a UUID — check it's present (36 chars with dashes)
+    assert(body.length > 40, s"Body too short to contain requestId: $body")
+  }
+
   test("POST with missing header AND malformed body accumulates both errors") {
     val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
       (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id.value, cmd.value.name))) }

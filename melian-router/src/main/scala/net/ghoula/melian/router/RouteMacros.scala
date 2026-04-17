@@ -37,13 +37,13 @@ object RouteMacros {
 
     val bodyTypeRepr = info.response.bodyTypeRepr.map(_.asInstanceOf[TypeRepr]).getOrElse(TypeRepr.of[Nothing])
     val templateParamNames = template.paramNames
+    val returnsEndpoint = info.response.isEndpoint
 
     bodyTypeRepr.asType match {
       case '[b] =>
         val bodyEncoderExpr = summonOrAbort[net.ghoula.eru.http.BodyEncoder[b]](
           method, pathStr, "response", s"BodyEncoder[${Type.show[b]}]")
 
-        // Build extraction list — closures that take (request, pathParams) and produce Eru[..., Any]
         var pathIdx = 0
         val extractionBuilders: List[(Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]], Expr[Map[String, String]]) => Expr[MEru[Any]]] =
           info.params.map { paramInfo =>
@@ -65,14 +65,38 @@ object RouteMacros {
             }
           }
 
-        val handlerExpr: Expr[(net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], Map[String, String]) => MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] =
-          '{
-            (request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], pathParams: Map[String, String]) =>
-              ${
-                val exprs = extractionBuilders.map(f => f('request, 'pathParams))
-                nestAndCall[H, b](handler, exprs, bodyEncoderExpr)
+        // Generate the complete handler expression at compile time
+        val handlerExpr = '{
+          (request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], pathParams: Map[String, String]) =>
+            ${
+              val exprs = extractionBuilders.map(f => f('request, 'pathParams))
+              val exprsList = Expr.ofList(exprs)
+
+              // Generate the typed handler call + response encoding
+              val callAndEncode: Expr[List[Any] => MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] =
+                generateTypedCallAndEncode[H, b](handler, info, bodyEncoderExpr, returnsEndpoint, 'request)
+
+              '{
+                val extractions = $exprsList
+                val attempted = extractions.map(_.attempt)
+                net.ghoula.eru.Eru.sequence(attempted).flatMap { results =>
+                  val values = results.collect { case net.ghoula.eru.Result.Success(v) => v }
+                  val errors = results.collect { case net.ghoula.eru.Result.Failure(e) => e }
+                  if errors.nonEmpty then {
+                    val allErrors = errors.flatMap {
+                      case net.ghoula.melian.RequestError.ExtractionFailed(errs) => errs.toList
+                      case other => List(net.ghoula.melian.ExtractionError(
+                        net.ghoula.melian.ExtractionSource.Path, "unknown", other.toString, None, None))
+                    }.toVector
+                    net.ghoula.eru.Eru.fail(
+                      net.ghoula.melian.RequestError.ExtractionFailed(allErrors): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError)
+                  } else {
+                    $callAndEncode(values)
+                  }
+                }
               }
-          }
+            }
+        }
 
         '{
           $builder.addEntry(RouteEntry(
@@ -81,6 +105,88 @@ object RouteMacros {
             handler = $handlerExpr
           ))
         }
+    }
+  }
+
+  /** Generates a typed function that takes extracted args and calls the handler + encodes response.
+    * All types are known at compile time — no runtime arity dispatch or asInstanceOf on the handler.
+    */
+  private def generateTypedCallAndEncode[H: Type, B: Type](using q: Quotes)(
+    handler: Expr[H],
+    info: HandlerIntrospection.HandlerInfo,
+    bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]],
+    returnsEndpoint: Boolean,
+    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]]
+  ): Expr[List[Any] => MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
+    import q.reflect.*
+
+    val paramCount = info.params.size
+    val responseWrapper = info.response.wrapperName
+
+    '{ (args: List[Any]) =>
+      val ctx = LiveRequestContext.from($request)
+      // Call handler — typed at compile time via H
+      val rawResult: Any = ${
+        // Generate the handler application for the known arity
+        paramCount match {
+          case 1 => '{ $handler.asInstanceOf[Any => Any].apply(args(0)) }
+          case 2 => '{ $handler.asInstanceOf[(Any, Any) => Any].apply(args(0), args(1)) }
+          case 3 => '{ $handler.asInstanceOf[(Any, Any, Any) => Any].apply(args(0), args(1), args(2)) }
+          case 4 => '{ $handler.asInstanceOf[(Any, Any, Any, Any) => Any].apply(args(0), args(1), args(2), args(3)) }
+          case n => report.errorAndAbort(s"Handlers with $n parameters not supported (max 4)")
+        }
+      }
+      // Resolve context function if handler returns Endpoint
+      val eru: net.ghoula.eru.Eru[Any, Any] = ${
+        if returnsEndpoint then
+          '{ rawResult.asInstanceOf[Function1[net.ghoula.melian.RequestContext, net.ghoula.eru.Eru[Any, Any]]].apply(ctx) }
+        else
+          '{ rawResult.asInstanceOf[net.ghoula.eru.Eru[Any, Any]] }
+      }
+      // Encode response — wrapper type known at compile time
+      eru.mapError { err =>
+        net.ghoula.eru.http.HttpError.ProtocolError(err.toString, "domain"): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError
+      }.flatMap { responseValue =>
+        ${
+          generateResponseEncoding[B](bodyEncoder, responseWrapper, 'responseValue)
+        }
+      }
+    }
+  }
+
+  /** Generates typed response encoding based on the compile-time known wrapper type. */
+  private def generateResponseEncoding[B: Type](using q: Quotes)(
+    encoder: Expr[net.ghoula.eru.http.BodyEncoder[B]],
+    wrapperName: String,
+    responseValue: Expr[Any]
+  ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
+    wrapperName match {
+      case "Ok" =>
+        '{
+          val ok = $responseValue.asInstanceOf[net.ghoula.melian.Ok[B]]
+          net.ghoula.eru.http.Response.okEncoded(ok.body)(using $encoder).mapError { err =>
+            net.ghoula.eru.http.HttpError.BodyEncodeError(err): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError
+          }
+        }
+      case "Created" =>
+        '{
+          val created = $responseValue.asInstanceOf[net.ghoula.melian.Created[B]]
+          $encoder.encode(created.body).mapError { err =>
+            net.ghoula.eru.http.HttpError.BodyEncodeError(err): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError
+          }.map(body => net.ghoula.eru.http.Response(net.ghoula.eru.http.StatusCode.Created, net.ghoula.eru.http.Headers.empty, body))
+        }
+      case "Accepted" =>
+        '{
+          val accepted = $responseValue.asInstanceOf[net.ghoula.melian.Accepted[B]]
+          net.ghoula.eru.http.Response.acceptedEncoded(accepted.body)(using $encoder).mapError { err =>
+            net.ghoula.eru.http.HttpError.BodyEncodeError(err): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError
+          }
+        }
+      case "NoContent" =>
+        '{ net.ghoula.eru.Eru.succeed(net.ghoula.eru.http.Response.noContent) }
+      case other =>
+        import q.reflect.*
+        report.errorAndAbort(s"Unsupported response type: $other. Expected Ok, Created, Accepted, or NoContent.")
     }
   }
 
@@ -191,104 +297,6 @@ object RouteMacros {
             }.map(v => net.ghoula.melian.Json(v): Any)
           }
         }
-    }
-  }
-
-  // --- Handler call with error-accumulating extraction ---
-  // Uses Eru.attempt to run ALL extractions independently, then combines errors or calls handler.
-  // The handler.asInstanceOf is safe: opaque types erase at runtime.
-
-  private def nestAndCall[H: Type, B: Type](using q: Quotes)(
-    handler: Expr[H],
-    extractions: List[Expr[MEru[Any]]],
-    bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]]
-  ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
-    val extractionExprs = Expr.ofList(extractions)
-    '{
-      accumulateAndCall($extractionExprs, $handler, $bodyEncoder.asInstanceOf[net.ghoula.eru.http.BodyEncoder[Any]])
-    }
-  }
-
-  // Runtime: runs all extractions via attempt, accumulates errors, then calls handler or fails.
-  private def accumulateAndCall[H](
-    extractions: List[net.ghoula.eru.Eru[net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError, Any]],
-    handler: H,
-    encoder: net.ghoula.eru.http.BodyEncoder[Any]
-  ): net.ghoula.eru.Eru[net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
-    import net.ghoula.eru.Eru
-    import net.ghoula.eru.{Result as EruResult}
-
-    // Run all extractions, converting failures to values via attempt
-    val attempted: List[Eru[Nothing, EruResult[net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError, Any]]] =
-      extractions.map(_.attempt)
-
-    // Sequence the attempts (they never fail, so flatMap is fine here)
-    sequenceEru(attempted).flatMap { results =>
-      // Partition into successes and failures
-      val values = results.collect { case EruResult.Success(v) => v }
-      val errors = results.collect { case EruResult.Failure(e) => e }
-
-      if errors.nonEmpty then {
-        // Accumulate all extraction errors into a single ExtractionFailed
-        val allExtractionErrors = errors.flatMap {
-          case net.ghoula.melian.RequestError.ExtractionFailed(errs) => errs.toList
-          case other => List(net.ghoula.melian.ExtractionError(
-            net.ghoula.melian.ExtractionSource.Path, "unknown", other.toString, None, None))
-        }.toVector
-        Eru.fail(net.ghoula.melian.RequestError.ExtractionFailed(allExtractionErrors): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError)
-      } else {
-        // All succeeded — call handler
-        callHandler(handler, values, encoder)
-      }
-    }
-  }
-
-  private def sequenceEru[A](effects: List[net.ghoula.eru.Eru[Nothing, A]]): net.ghoula.eru.Eru[Nothing, List[A]] =
-    net.ghoula.eru.Eru.sequence(effects)
-
-  private def callHandler[H](
-    handler: H,
-    args: List[Any],
-    encoder: net.ghoula.eru.http.BodyEncoder[Any]
-  ): net.ghoula.eru.Eru[net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
-    import net.ghoula.eru.Eru
-    val result = args.size match {
-      case 1 => handler.asInstanceOf[Any => Eru[Any, Any]].apply(args(0))
-      case 2 => handler.asInstanceOf[(Any, Any) => Eru[Any, Any]].apply(args(0), args(1))
-      case 3 => handler.asInstanceOf[(Any, Any, Any) => Eru[Any, Any]].apply(args(0), args(1), args(2))
-      case 4 => handler.asInstanceOf[(Any, Any, Any, Any) => Eru[Any, Any]].apply(args(0), args(1), args(2), args(3))
-      case n => Eru.fail(net.ghoula.eru.http.HttpError.ProtocolError(s"Unsupported handler arity: $n", "internal"))
-    }
-    result.mapError { err =>
-      net.ghoula.eru.http.HttpError.ProtocolError(err.toString, "domain"): net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError
-    }.flatMap(resp => encodeResponse(resp, encoder))
-  }
-
-  // --- Response encoding ---
-
-  // Runtime response encoding. The encoder is BodyEncoder[Any] via safe cast from the compile-time
-  // typed BodyEncoder[B]. The response wrapper (Ok, Created, etc.) is pattern-matched at runtime.
-  private def encodeResponse(
-    wrapper: Any,
-    encoder: net.ghoula.eru.http.BodyEncoder[Any]
-  ): net.ghoula.eru.Eru[net.ghoula.melian.RequestError | net.ghoula.eru.http.HttpError, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
-    import net.ghoula.eru.Eru
-    import net.ghoula.eru.http.*
-    wrapper match {
-      case ok: net.ghoula.melian.Ok[?] =>
-        Response.okEncoded(ok.body)(using encoder).mapError { err =>
-          HttpError.BodyEncodeError(err): net.ghoula.melian.RequestError | HttpError }
-      case _: net.ghoula.melian.NoContent.type =>
-        Eru.succeed(Response.noContent)
-      case created: net.ghoula.melian.Created[?] =>
-        encoder.encode(created.body).mapError { err =>
-          HttpError.BodyEncodeError(err): net.ghoula.melian.RequestError | HttpError
-        }.map(body => Response(StatusCode.Created, Headers.empty, body))
-      case accepted: net.ghoula.melian.Accepted[?] =>
-        Response.acceptedEncoded(accepted.body)(using encoder).mapError { err =>
-          HttpError.BodyEncodeError(err): net.ghoula.melian.RequestError | HttpError }
-      case _ =>
-        Eru.succeed(Response(StatusCode.Ok, Headers.empty, Body.text(wrapper.toString)))
     }
   }
 

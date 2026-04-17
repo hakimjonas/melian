@@ -33,7 +33,8 @@ object HandlerIntrospection {
     errorTypeRepr: Any,
     wrapperName: String,
     bodyTypeRepr: Option[Any],
-    bodyTypeShow: Option[String]
+    bodyTypeShow: Option[String],
+    isEndpoint: Boolean
   )
 
   case class HandlerInfo(
@@ -112,27 +113,27 @@ object HandlerIntrospection {
   private def classifyResponse(using q: Quotes)(tpe: q.reflect.TypeRepr): ResponseInfo = {
     import q.reflect.*
 
-    val unwrapped = unwrapEndpoint(tpe)
+    val (unwrapped, isEndpoint) = unwrapEndpoint(tpe)
     unwrapped.dealias match {
       case AppliedType(eru, List(errorType, responseType)) if eru.typeSymbol.fullName == "net.ghoula.eru.Eru" =>
         responseType.dealias match {
           case AppliedType(wrapper, List(body)) =>
-            ResponseInfo(errorType, wrapper.typeSymbol.name, Some(body), Some(body.show))
+            ResponseInfo(errorType, wrapper.typeSymbol.name, Some(body), Some(body.show), isEndpoint)
           case terminal =>
-            ResponseInfo(errorType, terminal.typeSymbol.name, None, None)
+            ResponseInfo(errorType, terminal.typeSymbol.name, None, None, isEndpoint)
         }
       case other =>
-        ResponseInfo(TypeRepr.of[Nothing], other.show, None, None)
+        ResponseInfo(TypeRepr.of[Nothing], other.show, None, None, isEndpoint)
     }
   }
 
-  private def unwrapEndpoint(using q: Quotes)(tpe: q.reflect.TypeRepr): q.reflect.TypeRepr = {
+  private def unwrapEndpoint(using q: Quotes)(tpe: q.reflect.TypeRepr): (q.reflect.TypeRepr, Boolean) = {
     import q.reflect.*
 
     tpe.dealias match {
       case AppliedType(cf, List(_, result)) if cf.typeSymbol.fullName.contains("ContextFunction") =>
-        result
-      case other => other
+        (result, true)
+      case other => (other, false)
     }
   }
 }
