@@ -78,34 +78,46 @@ object RouteMacros {
   ): Expr[HandlerFn] = {
     import q.reflect.*
 
+    // Extract E (error type) and R (response type, e.g. Ok[B]) from the handler's return
+    val (_, returnType) = HandlerIntrospection.decomposeFunction(TypeRepr.of[H].dealias)
+    val (unwrappedReturn, _) = returnType.dealias match {
+      case AppliedType(cf, List(_, result)) if cf.typeSymbol.fullName.contains("ContextFunction") => (result, true)
+      case other => (other, false)
+    }
+    val (errorTypeRepr, responseTypeRepr) = unwrappedReturn.dealias match {
+      case AppliedType(_, List(e, r)) => (e, r)
+      case _ => (TypeRepr.of[Nothing], TypeRepr.of[Nothing])
+    }
+
     val innerTypes = paramTypes.map {
       case AppliedType(_, List(inner)) => inner
       case other => other
     }
 
-    innerTypes match {
-      case List(t0) =>
+    // Dispatch by arity with full type parameters: H, A0..An, E, R, B
+    (innerTypes, errorTypeRepr.asType, responseTypeRepr.asType) match {
+      case (List(t0), '[e], '[r]) =>
         t0.asType match { case '[a0] =>
-          gen1[H, a0, B](handler, info, templateParamNames, bodyEncoder, returnsEndpoint, pathStr, method)
+          gen1[H, a0, e, r, B](handler, info, templateParamNames, bodyEncoder, returnsEndpoint, pathStr, method)
         }
-      case List(t0, t1) =>
+      case (List(t0, t1), '[e], '[r]) =>
         (t0.asType, t1.asType) match {
           case ('[a0], '[a1]) =>
-            gen2[H, a0, a1, B](handler, info, templateParamNames, bodyEncoder, returnsEndpoint, pathStr, method)
+            gen2[H, a0, a1, e, r, B](handler, info, templateParamNames, bodyEncoder, returnsEndpoint, pathStr, method)
           case _ => report.errorAndAbort("Failed to extract parameter types")
         }
-      case List(t0, t1, t2) =>
+      case (List(t0, t1, t2), '[e], '[r]) =>
         (t0.asType, t1.asType, t2.asType) match {
           case ('[a0], '[a1], '[a2]) =>
-            gen3[H, a0, a1, a2, B](handler, info, templateParamNames, bodyEncoder, returnsEndpoint, pathStr, method)
+            gen3[H, a0, a1, a2, e, r, B](handler, info, templateParamNames, bodyEncoder, returnsEndpoint, pathStr, method)
           case _ => report.errorAndAbort("Failed to extract parameter types")
         }
-      case other =>
+      case (other, _, _) =>
         report.errorAndAbort(s"Handlers with ${other.size} parameters not yet supported (max 3)")
     }
   }
 
-  private def gen1[H: Type, A0: Type, B: Type](using q: Quotes)(
+  private def gen1[H: Type, A0: Type, E: Type, R: Type, B: Type](using q: Quotes)(
     handler: Expr[H], info: HandlerIntrospection.HandlerInfo,
     templateParamNames: List[String],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]], returnsEndpoint: Boolean,
@@ -116,14 +128,14 @@ object RouteMacros {
       (request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], pathParams: Map[String, String]) =>
         ${ e0('request, 'pathParams) }.attempt.flatMap {
           case net.ghoula.eru.Result.Success(a0) =>
-            ${ callHandler1[H, A0, B](handler, 'a0, bodyEncoder, returnsEndpoint, 'request) }
+            ${ callHandler1[H, A0, E, R, B](handler, 'a0, bodyEncoder, returnsEndpoint, 'request) }
           case net.ghoula.eru.Result.Failure(err) =>
             net.ghoula.eru.Eru.fail(err)
         }
     }
   }
 
-  private def gen2[H: Type, A0: Type, A1: Type, B: Type](using q: Quotes)(
+  private def gen2[H: Type, A0: Type, A1: Type, E: Type, R: Type, B: Type](using q: Quotes)(
     handler: Expr[H], info: HandlerIntrospection.HandlerInfo,
     templateParamNames: List[String],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]], returnsEndpoint: Boolean,
@@ -135,14 +147,14 @@ object RouteMacros {
       (request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], pathParams: Map[String, String]) =>
         ${ e0('request, 'pathParams) }.attempt.zip(${ e1('request, 'pathParams) }.attempt).flatMap {
           case (net.ghoula.eru.Result.Success(a0), net.ghoula.eru.Result.Success(a1)) =>
-            ${ callHandler2[H, A0, A1, B](handler, 'a0, 'a1, bodyEncoder, returnsEndpoint, 'request) }
+            ${ callHandler2[H, A0, A1, E, R, B](handler, 'a0, 'a1, bodyEncoder, returnsEndpoint, 'request) }
           case (r0, r1) =>
             net.ghoula.eru.Eru.fail(collectErrors(r0, r1))
         }
     }
   }
 
-  private def gen3[H: Type, A0: Type, A1: Type, A2: Type, B: Type](using q: Quotes)(
+  private def gen3[H: Type, A0: Type, A1: Type, A2: Type, E: Type, R: Type, B: Type](using q: Quotes)(
     handler: Expr[H], info: HandlerIntrospection.HandlerInfo,
     templateParamNames: List[String],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]], returnsEndpoint: Boolean,
@@ -158,102 +170,101 @@ object RouteMacros {
           .zip(${ e2('request, 'pathParams) }.attempt)
           .flatMap {
             case ((net.ghoula.eru.Result.Success(a0), net.ghoula.eru.Result.Success(a1)), net.ghoula.eru.Result.Success(a2)) =>
-              ${ callHandler3[H, A0, A1, A2, B](handler, 'a0, 'a1, 'a2, bodyEncoder, returnsEndpoint, 'request) }
+              ${ callHandler3[H, A0, A1, A2, E, R, B](handler, 'a0, 'a1, 'a2, bodyEncoder, returnsEndpoint, 'request) }
             case ((r0, r1), r2) =>
               net.ghoula.eru.Eru.fail(collectErrors(r0, r1, r2))
           }
     }
   }
 
-  // --- Typed handler calls — no asInstanceOf on the handler ---
+  // --- Typed handler calls — fully typed including return type ---
 
-  private def callHandler1[H: Type, A0: Type, B: Type](using q: Quotes)(
+  private def callHandler1[H: Type, A0: Type, E: Type, R: Type, B: Type](using q: Quotes)(
     handler: Expr[H], a0: Expr[A0],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]], returnsEndpoint: Boolean,
     request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]]
   ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
-    // H = A0 => Eru[E, R] or A0 => (RequestContext ?=> Eru[E, R])
-    // Since Path[A0] = A0 etc., this is fully typed
-    val rawResult =
+    val eru: Expr[net.ghoula.eru.Eru[E, R]] =
       if returnsEndpoint then '{
         val ctx = LiveRequestContext.from($request)
         given net.ghoula.melian.RequestContext = ctx
-        $handler.asInstanceOf[A0 => net.ghoula.melian.Endpoint[Any, Any]].apply($a0)
+        $handler.asInstanceOf[A0 => net.ghoula.melian.Endpoint[E, R]].apply($a0)
       }
-      else '{ $handler.asInstanceOf[A0 => net.ghoula.eru.Eru[Any, Any]].apply($a0) }
+      else '{ $handler.asInstanceOf[A0 => net.ghoula.eru.Eru[E, R]].apply($a0) }
 
-    encodeEruResponse[B](rawResult, bodyEncoder)
+    encodeTypedResponse[E, R, B](eru, bodyEncoder)
   }
 
-  private def callHandler2[H: Type, A0: Type, A1: Type, B: Type](using q: Quotes)(
+  private def callHandler2[H: Type, A0: Type, A1: Type, E: Type, R: Type, B: Type](using q: Quotes)(
     handler: Expr[H], a0: Expr[A0], a1: Expr[A1],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]], returnsEndpoint: Boolean,
     request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]]
   ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
-    val rawResult =
+    val eru: Expr[net.ghoula.eru.Eru[E, R]] =
       if returnsEndpoint then '{
         val ctx = LiveRequestContext.from($request)
         given net.ghoula.melian.RequestContext = ctx
-        $handler.asInstanceOf[(A0, A1) => net.ghoula.melian.Endpoint[Any, Any]].apply($a0, $a1)
+        $handler.asInstanceOf[(A0, A1) => net.ghoula.melian.Endpoint[E, R]].apply($a0, $a1)
       }
-      else '{ $handler.asInstanceOf[(A0, A1) => net.ghoula.eru.Eru[Any, Any]].apply($a0, $a1) }
+      else '{ $handler.asInstanceOf[(A0, A1) => net.ghoula.eru.Eru[E, R]].apply($a0, $a1) }
 
-    encodeEruResponse[B](rawResult, bodyEncoder)
+    encodeTypedResponse[E, R, B](eru, bodyEncoder)
   }
 
-  private def callHandler3[H: Type, A0: Type, A1: Type, A2: Type, B: Type](using q: Quotes)(
+  private def callHandler3[H: Type, A0: Type, A1: Type, A2: Type, E: Type, R: Type, B: Type](using q: Quotes)(
     handler: Expr[H], a0: Expr[A0], a1: Expr[A1], a2: Expr[A2],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]], returnsEndpoint: Boolean,
     request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]]
   ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
-    val rawResult =
+    val eru: Expr[net.ghoula.eru.Eru[E, R]] =
       if returnsEndpoint then '{
         val ctx = LiveRequestContext.from($request)
         given net.ghoula.melian.RequestContext = ctx
-        $handler.asInstanceOf[(A0, A1, A2) => net.ghoula.melian.Endpoint[Any, Any]].apply($a0, $a1, $a2)
+        $handler.asInstanceOf[(A0, A1, A2) => net.ghoula.melian.Endpoint[E, R]].apply($a0, $a1, $a2)
       }
-      else '{ $handler.asInstanceOf[(A0, A1, A2) => net.ghoula.eru.Eru[Any, Any]].apply($a0, $a1, $a2) }
+      else '{ $handler.asInstanceOf[(A0, A1, A2) => net.ghoula.eru.Eru[E, R]].apply($a0, $a1, $a2) }
 
-    encodeEruResponse[B](rawResult, bodyEncoder)
+    encodeTypedResponse[E, R, B](eru, bodyEncoder)
   }
 
-  // --- Response encoding ---
+  // --- Typed response encoding — R is the known response wrapper type ---
 
-  private def encodeEruResponse[B: Type](using q: Quotes)(
-    eru: Expr[net.ghoula.eru.Eru[Any, Any]],
+  private def encodeTypedResponse[E: Type, R: Type, B: Type](using q: Quotes)(
+    eru: Expr[net.ghoula.eru.Eru[E, R]],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]]
   ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
     '{
       $eru.mapError { err =>
         net.ghoula.eru.http.HttpError.ProtocolError(err.toString, "domain"): ErrType
-      }.flatMap { responseValue =>
-        encodeResponse[B](responseValue, $bodyEncoder)
+      }.flatMap { (response: R) =>
+        encodeResponse[R, B](response, $bodyEncoder)
       }
     }
   }
 
-  private def encodeResponse[B](
-    wrapper: Any,
+  // R is the response wrapper (Ok[B], Created[B], etc.), B is the body type
+  private def encodeResponse[R, B](
+    response: R,
     encoder: net.ghoula.eru.http.BodyEncoder[B]
   ): net.ghoula.eru.Eru[ErrType, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
     import net.ghoula.eru.Eru
     import net.ghoula.eru.http.*
-    wrapper match {
-      case ok: net.ghoula.melian.Ok[?] =>
-        // ok.body is B due to compile-time type alignment from response type analysis
-        Response.okEncoded(ok.body.asInstanceOf[B])(using encoder).mapError { err =>
+    // Pattern match is safe: R is the compile-time known response type (Ok[B], Created[B], etc.)
+    (response: Any) match {
+      case ok: net.ghoula.melian.Ok[B @unchecked] =>
+        Response.okEncoded(ok.body)(using encoder).mapError { err =>
           HttpError.BodyEncodeError(err): ErrType }
       case _: net.ghoula.melian.NoContent.type =>
         Eru.succeed(Response.noContent)
-      case created: net.ghoula.melian.Created[?] =>
-        encoder.encode(created.body.asInstanceOf[B]).mapError { err =>
+      case created: net.ghoula.melian.Created[B @unchecked] =>
+        encoder.encode(created.body).mapError { err =>
           HttpError.BodyEncodeError(err): ErrType
         }.map(body => Response(StatusCode.Created, Headers.empty, body))
-      case accepted: net.ghoula.melian.Accepted[?] =>
-        Response.acceptedEncoded(accepted.body.asInstanceOf[B])(using encoder).mapError { err =>
+      case accepted: net.ghoula.melian.Accepted[B @unchecked] =>
+        Response.acceptedEncoded(accepted.body)(using encoder).mapError { err =>
           HttpError.BodyEncodeError(err): ErrType }
       case _ =>
-        Eru.succeed(Response(StatusCode.Ok, Headers.empty, Body.text(wrapper.toString)))
+        Eru.succeed(Response(StatusCode.Ok, Headers.empty, Body.text(response.toString)))
     }
   }
 
