@@ -9,7 +9,10 @@ import net.ghoula.melian.RequestError
   * Produces a handler function compatible with eru-http's RequestHandler type. RequestErrors from
   * the Girdle pipeline are rendered as 400 Bad Request responses with RFC 9457 problem details.
   */
-final class Router private[router] (private val trie: RouteTrie) {
+final class Router private[router] (
+  private val trie: RouteTrie,
+  private val sanitizer: net.ghoula.melian.ErrorSanitizer = summon[net.ghoula.melian.ErrorSanitizer]
+) {
 
   def toHandler: Request[Body] => Eru[HttpError, Response[Body]] = { (request: Request[Body]) =>
     trie.lookup(request.uri.path, request.method) match {
@@ -32,13 +35,13 @@ final class Router private[router] (private val trie: RouteTrie) {
   }
 
   private def renderRequestError(error: RequestError): Response[Body] =
-    ProblemDetails.render(error)
+    ProblemDetails.render(sanitizer.sanitize(error))
 }
 
 object Router {
 
   def builder: RouterBuilder = RouterBuilder()
 
-  def fromRoutes(routes: Vector[RouteEntry]): Either[String, Router] =
-    RouteTrie.build(routes).map(trie => new Router(trie))
+  def fromRoutes(routes: Vector[RouteEntry])(using sanitizer: net.ghoula.melian.ErrorSanitizer): Either[String, Router] =
+    RouteTrie.build(routes).map(trie => new Router(trie, sanitizer))
 }

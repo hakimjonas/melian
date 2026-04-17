@@ -27,8 +27,8 @@ final class RouterBuilder private[router] (
   inline def patch[H](path: String, handler: H): RouterBuilder =
     ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "PATCH" }) }
 
-  def build: Either[String, Router] =
-    RouteTrie.build(entries).map(trie => new Router(trie))
+  def build(using sanitizer: net.ghoula.melian.ErrorSanitizer = net.ghoula.melian.ErrorSanitizer.development): Either[String, Router] =
+    RouteTrie.build(entries).map(trie => new Router(trie, sanitizer))
 }
 
 object RouterBuilder {
