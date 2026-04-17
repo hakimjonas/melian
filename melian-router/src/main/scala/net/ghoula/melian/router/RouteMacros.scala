@@ -35,7 +35,7 @@ object RouteMacros {
       case _ => report.errorAndAbort(s"Unsupported HTTP method: $method")
     }
 
-    // Extract E, R, B from handler return type
+    // Decompose return type to get E, R, B
     val (_, returnType) = HandlerIntrospection.decomposeFunction(TypeRepr.of[H].dealias)
     val (unwrappedReturn, _) = returnType.dealias match {
       case AppliedType(cf, List(_, result)) if cf.typeSymbol.fullName.contains("ContextFunction") => (result, true)
@@ -49,7 +49,6 @@ object RouteMacros {
       case AppliedType(_, List(b)) => b
       case _ => TypeRepr.of[Nothing]
     }
-
     val returnsEndpoint = info.response.isEndpoint
 
     (errorTypeRepr.asType, responseTypeRepr.asType, bodyTypeRepr.asType) match {
@@ -59,7 +58,6 @@ object RouteMacros {
         val errorRendererExpr = summonOrAbort[net.ghoula.melian.ErrorRenderer[e]](
           method, pathStr, "error", s"ErrorRenderer[${Type.show[e]}]")
 
-        // Build extraction exprs recursively over param types
         val paramTypes = TypeRepr.of[H].dealias match {
           case AppliedType(_, args) => args.init
           case _ => report.errorAndAbort("Cannot decompose handler type")
@@ -69,34 +67,37 @@ object RouteMacros {
         val handlerExpr: Expr[HandlerFn] = '{
           (request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], pathParams: Map[String, String]) =>
             ${
+              // Build typed extraction for each param
               var pathIdx = 0
-              val extractions: List[Expr[MEru[Any]]] = paramTypes.zip(info.params).map { case (tpe, paramInfo) =>
-                val innerType = tpe match {
-                  case AppliedType(_, List(inner)) => inner
-                  case other => other
+              val extractions: List[(HandlerIntrospection.ParamKind, q.reflect.TypeRepr, Expr[MEru[Any]])] =
+                paramTypes.zip(info.params).map { case (tpe, paramInfo) =>
+                  val innerType = tpe match {
+                    case AppliedType(_, List(inner)) => inner
+                    case other => other
+                  }
+                  innerType.asType match {
+                    case '[a] =>
+                      val expr: Expr[MEru[a]] = paramInfo.kind match {
+                        case HandlerIntrospection.ParamKind.PathParam =>
+                          val name = templateParamNames(pathIdx)
+                          pathIdx += 1
+                          mkPathExtraction[a](name, 'pathParams, pathStr, method)
+                        case HandlerIntrospection.ParamKind.HeaderParam =>
+                          mkHeaderExtraction[a]('request, pathStr, method)
+                        case HandlerIntrospection.ParamKind.JsonBody =>
+                          mkJsonBodyExtraction[a]('request, pathStr, method)
+                        case other =>
+                          report.errorAndAbort(s"Unsupported parameter kind: $other")
+                      }
+                      (paramInfo.kind, innerType, '{ $expr.map(v => v: Any) }: Expr[MEru[Any]])
+                  }
                 }
-                innerType.asType match {
-                  case '[a] =>
-                    val expr: Expr[MEru[a]] = paramInfo.kind match {
-                      case HandlerIntrospection.ParamKind.PathParam =>
-                        val name = templateParamNames(pathIdx)
-                        pathIdx += 1
-                        mkPathExtraction[a](name, 'pathParams, pathStr, method)
-                      case HandlerIntrospection.ParamKind.HeaderParam =>
-                        mkHeaderExtraction[a]('request, pathStr, method)
-                      case HandlerIntrospection.ParamKind.JsonBody =>
-                        mkJsonBodyExtraction[a]('request, pathStr, method)
-                      case other =>
-                        report.errorAndAbort(s"Unsupported parameter kind: $other")
-                    }
-                    '{ $expr.map(v => v: Any) }
-                }
-              }
 
-              // Attempt all, accumulate errors, call handler
-              val attemptedList = Expr.ofList(extractions.map(e => '{ $e.attempt }))
+              // Run all extractions with error accumulation, then call handler
+              val extractionExprs = Expr.ofList(extractions.map(_._3))
               '{
-                net.ghoula.eru.Eru.sequence($attemptedList).flatMap { results =>
+                val attempted = $extractionExprs.map(_.attempt)
+                net.ghoula.eru.Eru.sequence(attempted).flatMap { results =>
                   val values = results.collect { case net.ghoula.eru.Result.Success(v) => v }
                   val errors = results.collect { case net.ghoula.eru.Result.Failure(e) => e }
                   if errors.nonEmpty then {
@@ -109,22 +110,10 @@ object RouteMacros {
                       net.ghoula.melian.RequestError.ExtractionFailed(allErrors): ErrType)
                   } else {
                     ${
-                      val callExpr: Expr[List[Any] => net.ghoula.eru.Eru[e, r]] =
-                        if returnsEndpoint then '{
-                          (args: List[Any]) =>
-                            val ctx = LiveRequestContext.from(request)
-                            callFunction[e, r](args.size, $handler, args, Some(ctx))
-                        }
-                        else '{ (args: List[Any]) => callFunction[e, r](args.size, $handler, args, None) }
-                      '{
-                        $callExpr(values).attempt.flatMap {
-                          case net.ghoula.eru.Result.Success(response) =>
-                            encodeResponse[r, b](response, $bodyEncoderExpr, ${ Expr(pathStr) }, pathParams)
-                          case net.ghoula.eru.Result.Failure(domainError) =>
-                            $errorRendererExpr.render(domainError)
-                        }
-                      }
-                    }
+                      generateHandlerCall[H, e, r, b](
+                        handler, paramTypes.size, bodyEncoderExpr, errorRendererExpr,
+                        returnsEndpoint, 'request, 'pathParams, pathStr)
+                    }(values)
                   }
                 }
               }
@@ -140,6 +129,56 @@ object RouteMacros {
         }
 
       case _ => report.errorAndAbort("Failed to extract error/response/body types from handler")
+    }
+  }
+
+  /** Generates a function that takes a List[Any] of extracted values and calls the handler.
+    * The arity is known at compile time — the exact FunctionN call is generated.
+    */
+  private def generateHandlerCall[H: Type, E: Type, R: Type, B: Type](using q: Quotes)(
+    handler: Expr[H],
+    arity: Int,
+    bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]],
+    errorRenderer: Expr[net.ghoula.melian.ErrorRenderer[E]],
+    returnsEndpoint: Boolean,
+    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
+    pathParams: Expr[Map[String, String]],
+    pathStr: String
+  ): Expr[List[Any] => MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
+    import q.reflect.*
+
+    val applyExpr: Expr[List[Any] => Any] = arity match {
+      case 1 => '{ (a: List[Any]) => $handler.asInstanceOf[Any => Any].apply(a(0)) }
+      case 2 => '{ (a: List[Any]) => $handler.asInstanceOf[(Any, Any) => Any].apply(a(0), a(1)) }
+      case 3 => '{ (a: List[Any]) => $handler.asInstanceOf[(Any, Any, Any) => Any].apply(a(0), a(1), a(2)) }
+      case 4 => '{ (a: List[Any]) => $handler.asInstanceOf[(Any, Any, Any, Any) => Any].apply(a(0), a(1), a(2), a(3)) }
+      case 5 => '{ (a: List[Any]) => $handler.asInstanceOf[(Any, Any, Any, Any, Any) => Any].apply(a(0), a(1), a(2), a(3), a(4)) }
+      case n => report.errorAndAbort(s"Handlers with $n parameters not yet supported (max 5)")
+    }
+
+    val pathTemplateExpr = Expr(pathStr)
+
+    if returnsEndpoint then '{
+      (args: List[Any]) =>
+        val ctx = LiveRequestContext.from($request)
+        given net.ghoula.melian.RequestContext = ctx
+        val eru: net.ghoula.eru.Eru[E, R] = $applyExpr(args).asInstanceOf[net.ghoula.melian.Endpoint[E, R]]
+        eru.attempt.flatMap {
+          case net.ghoula.eru.Result.Success(response) =>
+            encodeResponse[R, B](response, $bodyEncoder, $pathTemplateExpr, $pathParams)
+          case net.ghoula.eru.Result.Failure(domainError) =>
+            $errorRenderer.render(domainError)
+        }
+    }
+    else '{
+      (args: List[Any]) =>
+        val eru: net.ghoula.eru.Eru[E, R] = $applyExpr(args).asInstanceOf[net.ghoula.eru.Eru[E, R]]
+        eru.attempt.flatMap {
+          case net.ghoula.eru.Result.Success(response) =>
+            encodeResponse[R, B](response, $bodyEncoder, $pathTemplateExpr, $pathParams)
+          case net.ghoula.eru.Result.Failure(domainError) =>
+            $errorRenderer.render(domainError)
+        }
     }
   }
 
@@ -201,34 +240,6 @@ object RouteMacros {
           net.ghoula.melian.RequestError.DecodeFailed(List(err.message)): ErrType
         }
       }
-    }
-  }
-
-  // --- Handler call dispatch ---
-  // FunctionN at runtime — transparent aliases mean param types match.
-  // The asInstanceOf is on the handler's FunctionN type, not on individual args.
-  private def callFunction[E, R](
-    arity: Int,
-    handler: Any,
-    args: List[Any],
-    ctx: Option[net.ghoula.melian.RequestContext]
-  ): net.ghoula.eru.Eru[E, R] = {
-    val result = arity match {
-      case 1 => handler.asInstanceOf[Any => Any].apply(args(0))
-      case 2 => handler.asInstanceOf[(Any, Any) => Any].apply(args(0), args(1))
-      case 3 => handler.asInstanceOf[(Any, Any, Any) => Any].apply(args(0), args(1), args(2))
-      case 4 => handler.asInstanceOf[(Any, Any, Any, Any) => Any].apply(args(0), args(1), args(2), args(3))
-      case 5 => handler.asInstanceOf[(Any, Any, Any, Any, Any) => Any].apply(args(0), args(1), args(2), args(3), args(4))
-      case n => return net.ghoula.eru.Eru.fail(throw new MatchError(s"Unsupported handler arity: $n"))
-    }
-    ctx match {
-      case Some(c) =>
-        result match {
-          case f: Function1[?, ?] if !result.isInstanceOf[net.ghoula.eru.Eru[?, ?]] =>
-            f.asInstanceOf[Function1[net.ghoula.melian.RequestContext, net.ghoula.eru.Eru[E, R]]].apply(c)
-          case eru => eru.asInstanceOf[net.ghoula.eru.Eru[E, R]]
-        }
-      case None => result.asInstanceOf[net.ghoula.eru.Eru[E, R]]
     }
   }
 
