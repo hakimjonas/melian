@@ -12,34 +12,20 @@ import java.util.UUID
 object ParsePrimitive {
 
   def int(raw: String, source: ExtractionSource, field: String): Eru[ExtractionError, Int] =
-    raw.toIntOption match {
-      case Some(n) => Eru.succeed(n)
-      case None => Eru.fail(error(source, field, "invalid integer", "integer", raw))
-    }
+    Eru.fromOption(raw.toIntOption, error(source, field, "invalid integer", "integer", raw))
 
   def long(raw: String, source: ExtractionSource, field: String): Eru[ExtractionError, Long] =
-    raw.toLongOption match {
-      case Some(n) => Eru.succeed(n)
-      case None => Eru.fail(error(source, field, "invalid long", "long", raw))
-    }
+    Eru.fromOption(raw.toLongOption, error(source, field, "invalid long", "long", raw))
 
   def double(raw: String, source: ExtractionSource, field: String): Eru[ExtractionError, Double] =
-    raw.toDoubleOption match {
-      case Some(d) => Eru.succeed(d)
-      case None => Eru.fail(error(source, field, "invalid double", "number", raw))
-    }
+    Eru.fromOption(raw.toDoubleOption, error(source, field, "invalid double", "number", raw))
 
   def boolean(raw: String, source: ExtractionSource, field: String): Eru[ExtractionError, Boolean] =
-    raw.toBooleanOption match {
-      case Some(b) => Eru.succeed(b)
-      case None => Eru.fail(error(source, field, "invalid boolean", "true|false", raw))
-    }
+    Eru.fromOption(raw.toBooleanOption, error(source, field, "invalid boolean", "true|false", raw))
 
   def uuid(raw: String, source: ExtractionSource, field: String): Eru[ExtractionError, UUID] =
-    scala.util.Try(UUID.fromString(raw)).fold(
-      _ => Eru.fail(error(source, field, "invalid UUID format", "UUID", raw)),
-      u => Eru.succeed(u)
-    )
+    Eru.fromTry(scala.util.Try(UUID.fromString(raw)))
+      .mapError(_ => error(source, field, "invalid UUID format", "UUID", raw))
 
   private def error(
     source: ExtractionSource,

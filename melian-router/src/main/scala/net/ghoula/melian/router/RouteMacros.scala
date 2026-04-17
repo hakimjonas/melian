@@ -244,9 +244,7 @@ object RouteMacros {
   }
 
   private def sequenceEru[A](effects: List[net.ghoula.eru.Eru[Nothing, A]]): net.ghoula.eru.Eru[Nothing, List[A]] =
-    effects.foldRight(net.ghoula.eru.Eru.succeed(List.empty[A])) { (effect, acc) =>
-      effect.flatMap(a => acc.map(rest => a :: rest))
-    }
+    net.ghoula.eru.Eru.sequence(effects)
 
   private def callHandler[H](
     handler: H,
