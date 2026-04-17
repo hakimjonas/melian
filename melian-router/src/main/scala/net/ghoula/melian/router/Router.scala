@@ -32,7 +32,7 @@ final class Router private[router] (private val trie: RouteTrie) {
   }
 
   private def renderRequestError(error: RequestError): Response[Body] =
-    Response.badRequest(Body.text(error.toString, MediaType.applicationJson))
+    ProblemDetails.render(error)
 }
 
 object Router {

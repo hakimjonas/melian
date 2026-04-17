@@ -219,6 +219,26 @@ class RouterBuilderSpec extends FunSuite {
     assert(body.contains("550e8400"), s"Body missing ID: $body")
   }
 
+  test("extraction error returns RFC 9457 problem+json") {
+    val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
+      (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id, cmd.name))) }
+
+    val router = Router.builder.post("/workspaces/:id", handler).build.getOrElse(fail("build failed"))
+
+    val response = run(router.toHandler, requestWith(
+      Method.POST, "/workspaces/not-a-uuid",
+      body = Body.text("""{"name":"test"}""", MediaType.applicationJson),
+      headerPairs = List("Authorization" -> "Bearer token")
+    ))
+
+    assertEquals(response.status, StatusCode.BadRequest)
+    val body = bodyText(response)
+    assert(body.contains("\"type\":\"about:blank\""), s"Missing RFC 9457 type: $body")
+    assert(body.contains("\"title\":\"Bad Request\""), s"Missing title: $body")
+    assert(body.contains("\"errors\""), s"Missing errors array: $body")
+    assert(body.contains("\"in\":\"path\""), s"Missing extraction source: $body")
+  }
+
   test("POST with missing header AND malformed body accumulates both errors") {
     val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
       (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id, cmd.name))) }
