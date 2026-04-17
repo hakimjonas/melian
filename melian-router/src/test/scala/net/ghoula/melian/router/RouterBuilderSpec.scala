@@ -190,6 +190,35 @@ class RouterBuilderSpec extends FunSuite {
     assert(body.length > 40, s"Body too short to contain requestId: $body")
   }
 
+  // --- ErrorRenderer tests ---
+
+  enum DomainError derives CanEqual {
+    case NotFound(id: UUID)
+    case Forbidden(reason: String)
+  }
+
+  given ErrorRenderer[DomainError] with {
+    def render(error: DomainError): Eru[Nothing, net.ghoula.eru.http.Response[Body]] = error match {
+      case DomainError.NotFound(id) =>
+        Eru.succeed(Response(StatusCode.NotFound, Headers.empty, Body.text(s"""{"error":"not found","id":"$id"}""", MediaType.applicationJson)))
+      case DomainError.Forbidden(reason) =>
+        Eru.succeed(Response(StatusCode.Forbidden, Headers.empty, Body.text(s"""{"error":"forbidden","reason":"$reason"}""", MediaType.applicationJson)))
+    }
+  }
+
+  test("domain error rendered via ErrorRenderer") {
+    val handler: Path[UUID] => Eru[DomainError, Ok[String]] =
+      (id: Path[UUID]) => Eru.fail(DomainError.NotFound(id))
+
+    val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWith(Method.GET, "/users/550e8400-e29b-41d4-a716-446655440000"))
+
+    assertEquals(response.status, StatusCode.NotFound)
+    val body = bodyText(response)
+    assert(body.contains("not found"), s"Body: $body")
+    assert(body.contains("550e8400"), s"Body missing ID: $body")
+  }
+
   test("POST with missing header AND malformed body accumulates both errors") {
     val handler: (Path[UUID], Header[BearerToken], Json[CreateCommand]) => Eru[Nothing, Ok[Workspace]] =
       (id, auth, cmd) => { val _ = auth; Eru.succeed(Ok(Workspace(id, cmd.name))) }

@@ -128,7 +128,7 @@ object RouteMacros {
       (request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], pathParams: Map[String, String]) =>
         ${ e0('request, 'pathParams) }.attempt.flatMap {
           case net.ghoula.eru.Result.Success(a0) =>
-            ${ callHandler1[H, A0, E, R, B](handler, 'a0, bodyEncoder, returnsEndpoint, 'request) }
+            ${ callHandler1[H, A0, E, R, B](handler, 'a0, bodyEncoder, returnsEndpoint, 'request, pathStr, method) }
           case net.ghoula.eru.Result.Failure(err) =>
             net.ghoula.eru.Eru.fail(err)
         }
@@ -147,7 +147,7 @@ object RouteMacros {
       (request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], pathParams: Map[String, String]) =>
         ${ e0('request, 'pathParams) }.attempt.zip(${ e1('request, 'pathParams) }.attempt).flatMap {
           case (net.ghoula.eru.Result.Success(a0), net.ghoula.eru.Result.Success(a1)) =>
-            ${ callHandler2[H, A0, A1, E, R, B](handler, 'a0, 'a1, bodyEncoder, returnsEndpoint, 'request) }
+            ${ callHandler2[H, A0, A1, E, R, B](handler, 'a0, 'a1, bodyEncoder, returnsEndpoint, 'request, pathStr, method) }
           case (r0, r1) =>
             net.ghoula.eru.Eru.fail(collectErrors(r0, r1))
         }
@@ -170,7 +170,7 @@ object RouteMacros {
           .zip(${ e2('request, 'pathParams) }.attempt)
           .flatMap {
             case ((net.ghoula.eru.Result.Success(a0), net.ghoula.eru.Result.Success(a1)), net.ghoula.eru.Result.Success(a2)) =>
-              ${ callHandler3[H, A0, A1, A2, E, R, B](handler, 'a0, 'a1, 'a2, bodyEncoder, returnsEndpoint, 'request) }
+              ${ callHandler3[H, A0, A1, A2, E, R, B](handler, 'a0, 'a1, 'a2, bodyEncoder, returnsEndpoint, 'request, pathStr, method) }
             case ((r0, r1), r2) =>
               net.ghoula.eru.Eru.fail(collectErrors(r0, r1, r2))
           }
@@ -182,7 +182,8 @@ object RouteMacros {
   private def callHandler1[H: Type, A0: Type, E: Type, R: Type, B: Type](using q: Quotes)(
     handler: Expr[H], a0: Expr[A0],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]], returnsEndpoint: Boolean,
-    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]]
+    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
+    pathStr: String, method: String
   ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
     val eru: Expr[net.ghoula.eru.Eru[E, R]] =
       if returnsEndpoint then '{
@@ -192,13 +193,14 @@ object RouteMacros {
       }
       else '{ $handler.asInstanceOf[A0 => net.ghoula.eru.Eru[E, R]].apply($a0) }
 
-    encodeTypedResponse[E, R, B](eru, bodyEncoder)
+    encodeTypedResponse[E, R, B](eru, bodyEncoder, pathStr, method)
   }
 
   private def callHandler2[H: Type, A0: Type, A1: Type, E: Type, R: Type, B: Type](using q: Quotes)(
     handler: Expr[H], a0: Expr[A0], a1: Expr[A1],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]], returnsEndpoint: Boolean,
-    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]]
+    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
+    pathStr: String, method: String
   ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
     val eru: Expr[net.ghoula.eru.Eru[E, R]] =
       if returnsEndpoint then '{
@@ -208,13 +210,14 @@ object RouteMacros {
       }
       else '{ $handler.asInstanceOf[(A0, A1) => net.ghoula.eru.Eru[E, R]].apply($a0, $a1) }
 
-    encodeTypedResponse[E, R, B](eru, bodyEncoder)
+    encodeTypedResponse[E, R, B](eru, bodyEncoder, pathStr, method)
   }
 
   private def callHandler3[H: Type, A0: Type, A1: Type, A2: Type, E: Type, R: Type, B: Type](using q: Quotes)(
     handler: Expr[H], a0: Expr[A0], a1: Expr[A1], a2: Expr[A2],
     bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]], returnsEndpoint: Boolean,
-    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]]
+    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
+    pathStr: String, method: String
   ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
     val eru: Expr[net.ghoula.eru.Eru[E, R]] =
       if returnsEndpoint then '{
@@ -224,20 +227,25 @@ object RouteMacros {
       }
       else '{ $handler.asInstanceOf[(A0, A1, A2) => net.ghoula.eru.Eru[E, R]].apply($a0, $a1, $a2) }
 
-    encodeTypedResponse[E, R, B](eru, bodyEncoder)
+    encodeTypedResponse[E, R, B](eru, bodyEncoder, pathStr, method)
   }
 
-  // --- Typed response encoding — R is the known response wrapper type ---
+  // --- Typed response encoding — E, R, B all known at compile time ---
 
   private def encodeTypedResponse[E: Type, R: Type, B: Type](using q: Quotes)(
     eru: Expr[net.ghoula.eru.Eru[E, R]],
-    bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]]
+    bodyEncoder: Expr[net.ghoula.eru.http.BodyEncoder[B]],
+    pathStr: String, method: String
   ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
+    val errorRenderer = summonOrAbort[net.ghoula.melian.ErrorRenderer[E]](
+      method, pathStr, "error", s"ErrorRenderer[${Type.show[E]}]")
+
     '{
-      $eru.mapError { err =>
-        net.ghoula.eru.http.HttpError.ProtocolError(err.toString, "domain"): ErrType
-      }.flatMap { (response: R) =>
-        encodeResponse[R, B](response, $bodyEncoder)
+      $eru.attempt.flatMap {
+        case net.ghoula.eru.Result.Success(response) =>
+          encodeResponse[R, B](response, $bodyEncoder)
+        case net.ghoula.eru.Result.Failure(domainError) =>
+          $errorRenderer.render(domainError)
       }
     }
   }
