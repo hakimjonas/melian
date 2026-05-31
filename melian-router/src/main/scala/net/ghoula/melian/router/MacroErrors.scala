@@ -14,7 +14,8 @@ object MacroErrors {
     handlerName: String,
     missing: List[MissingInstance]
   ): String = {
-    val header = s"Cannot bind $method $path to $handlerName: missing typeclass instances for ${missing.size} parameter(s).\n"
+    val header =
+      s"Cannot bind $method $path to $handlerName: missing typeclass instances for ${missing.size} parameter(s).\n"
     val details = missing.zipWithIndex.map { case (m, i) =>
       s"  ${i + 1}. Parameter '${m.field}' of type ${m.fieldType}\n" +
         s"     Missing: ${m.typeclass}\n" +

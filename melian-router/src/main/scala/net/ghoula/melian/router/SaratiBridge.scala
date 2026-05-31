@@ -1,13 +1,13 @@
 package net.ghoula.melian.router
 
+import parser.core.Result as RumilResult
+import parsers.json.parseJson
+
 import net.ghoula.eru.Eru
 import net.ghoula.eru.http.{Body, BodyDecoder, BodyEncoder, DecodeError, EncodeError, Headers, MediaType}
-import net.ghoula.sarati.ast.json.{JsonValue, formatJson, compactFormat}
+import net.ghoula.sarati.Result as SaratiResult
+import net.ghoula.sarati.ast.json.{JsonValue, compactFormat, formatJson}
 import net.ghoula.sarati.codec.{Decoder, Encoder}
-import net.ghoula.sarati.{Result as SaratiResult}
-
-import parser.core.{Result as RumilResult}
-import parsers.json.parseJson
 
 /** Bridges Sarati's AST codecs to eru-http's BodyEncoder/BodyDecoder.
   *
@@ -52,10 +52,13 @@ object SaratiBridge {
       case Some(ct) =>
         MediaType.parse(ct) match {
           case _ if ct.contains("json") => Eru.succeed(())
-          case _ => Eru.fail(DecodeError(
-            s"Unsupported Content-Type: $ct. Expected application/json.",
-            None
-          ))
+          case _ =>
+            Eru.fail(
+              DecodeError(
+                s"Unsupported Content-Type: $ct. Expected application/json.",
+                None
+              )
+            )
         }
     }
 
@@ -80,8 +83,7 @@ object SaratiBridge {
   // --- JSON depth guard (security: prevents stack overflow from nested payloads) ---
 
   private def guardDepth(json: JsonValue): Eru[DecodeError, JsonValue] =
-    if depth(json) > MaxJsonDepth then
-      Eru.fail(DecodeError(s"JSON nesting depth exceeds limit of $MaxJsonDepth", None))
+    if depth(json) > MaxJsonDepth then Eru.fail(DecodeError(s"JSON nesting depth exceeds limit of $MaxJsonDepth", None))
     else Eru.succeed(json)
 
   private def depth(json: JsonValue): Int = json match {

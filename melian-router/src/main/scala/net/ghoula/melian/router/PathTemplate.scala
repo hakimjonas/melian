@@ -29,12 +29,14 @@ object PathTemplate {
     case p if !p.startsWith("/") => Left(s"Path must start with '/': $path")
     case "/" => Right(ParsedPath(Nil))
     case p =>
-      p.stripPrefix("/").split("/").toList
+      p.stripPrefix("/")
+        .split("/")
+        .toList
         .foldLeft[Either[String, List[Segment]]](Right(Nil)) { (acc, part) =>
           acc.flatMap { segments =>
             part match {
               case s":$name" if name.nonEmpty => Right(segments :+ Segment.Param(name))
-              case s":$_"                     => Left(s"Empty parameter name in path: $path")
+              case s":$_" => Left(s"Empty parameter name in path: $path")
               case "" => Left(s"Empty segment in path: $path")
               case literal => Right(segments :+ Segment.Literal(literal))
             }

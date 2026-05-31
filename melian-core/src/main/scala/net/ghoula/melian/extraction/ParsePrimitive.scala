@@ -1,9 +1,9 @@
 package net.ghoula.melian.extraction
 
+import java.util.UUID
+
 import net.ghoula.eru.Eru
 import net.ghoula.melian.{ExtractionError, ExtractionSource}
-
-import java.util.UUID
 
 /** Shared primitive parsing used by FromPathSegment and FromQueryParam.
   *
@@ -24,7 +24,8 @@ object ParsePrimitive {
     Eru.fromOption(raw.toBooleanOption, error(source, field, "invalid boolean", "true|false", raw))
 
   def uuid(raw: String, source: ExtractionSource, field: String): Eru[ExtractionError, UUID] =
-    Eru.fromTry(scala.util.Try(UUID.fromString(raw)))
+    Eru
+      .fromTry(scala.util.Try(UUID.fromString(raw)))
       .mapError(_ => error(source, field, "invalid UUID format", "UUID", raw))
 
   private def error(

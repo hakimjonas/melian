@@ -25,7 +25,8 @@ object HandlerIntrospection {
     kind: ParamKind,
     markerTypeRepr: Any,
     innerTypeRepr: Any,
-    innerTypeShow: String
+    innerTypeShow: String,
+    queryParamName: Option[String] = None
   )
 
   /** Compile-time info about the handler's response type. */
@@ -78,7 +79,9 @@ object HandlerIntrospection {
   }
 
   /** Returns (paramTypes, returnType) from a FunctionN type. */
-  def decomposeFunction(using q: Quotes)(
+  def decomposeFunction(using
+    q: Quotes
+  )(
     tpe: q.reflect.TypeRepr
   ): (List[q.reflect.TypeRepr], q.reflect.TypeRepr) = {
     import q.reflect.*
@@ -98,6 +101,13 @@ object HandlerIntrospection {
     import q.reflect.*
 
     tpe match {
+      case AppliedType(base, List(nameType, inner))
+          if base.typeSymbol.fullName.startsWith(melianPackage) && base.typeSymbol.name == "Query" =>
+        val paramName = nameType match {
+          case ConstantType(StringConstant(name)) => name
+          case other => report.errorAndAbort(s"Query parameter name must be a string literal, got: ${other.show}")
+        }
+        ParamInfo(index, ParamKind.QueryParam, tpe, inner, inner.show, queryParamName = Some(paramName))
       case AppliedType(base, List(inner)) =>
         val fullName = base.typeSymbol.fullName
         val simpleName = base.typeSymbol.name

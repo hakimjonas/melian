@@ -1,9 +1,9 @@
 package net.ghoula.melian.server
 
 import net.ghoula.eru.Eru
+import net.ghoula.eru.EruRuntime
 import net.ghoula.eru.http.*
 import net.ghoula.eru.http.server.{HttpServer, HttpServerConfig, Middleware}
-import net.ghoula.eru.EruRuntime
 import net.ghoula.melian.router.Router
 
 /** Entry point for running a Melian router as an HTTP server.
@@ -11,20 +11,25 @@ import net.ghoula.melian.router.Router
   * Bridges Router to eru-http's HttpServer, composing with eru-http's middleware stack. Melian does
   * not define its own middleware — it uses eru-http's Middleware type directly.
   *
+  * Bracket-scoped external resources (database pools, message brokers) compose naturally by
+  * nesting: the outer bracket acquires the resource, the inner bracket runs the server. On
+  * shutdown, the server closes first, then the resource — correct ordering by construction.
+  *
   * @example
   *   {{{
-  *   val router = Router.builder
-  *     .get("/users/:id", getUser)
-  *     .post("/users", createUser)
-  *     .build
-  *     .getOrElse(sys.error("route build failed"))
-  *
-  *   given EruRuntime = EruRuntime.shared
-  *
+  *   // Basic server
   *   MelianServer.serve(router) { server =>
-  *     server.start.flatMap { address =>
-  *       Eru.succeed(println(s"Listening on $address"))
-  *     }
+  *     server.start.map(addr => println(s"Listening on $addr"))
+  *   }
+  *
+  *   // With bracket-scoped resources (e.g. database pool)
+  *   EruPostgres.scoped(dbConfig) { db =>
+  *     val router = Router.builder
+  *       .get("/users/:id", userHandler(db))
+  *       .build.getOrElse(sys.error("route build failed"))
+  *     MelianServer.serve(router) { server =>
+  *       server.start.map(addr => println(s"Listening on $addr"))
+  *     }.mapError(e => DbOrHttpError.Http(e))
   *   }
   *   }}}
   */

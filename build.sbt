@@ -81,18 +81,21 @@ val valarVersion: String = "0.6.0"
 val munitVersion: String = "1.2.3"
 
 // ===== Local Project References =====
-val useLocalEruHttp: Boolean = file("../eru-http/build.sbt").exists()
-val useLocalSarati: Boolean = file("../sarati/build.sbt").exists()
-val useLocalRumil: Boolean = file("../rumil/build.sbt").exists()
+// Use absolute path so these resolve correctly even when loaded via ProjectRef from another build
+val examplesDir: File = file("/home/hakim/examples")
+
+val useLocalEruHttp: Boolean = (examplesDir / "eru-http" / "build.sbt").exists()
+val useLocalSarati: Boolean = (examplesDir / "sarati" / "build.sbt").exists()
+val useLocalRumil: Boolean = (examplesDir / "rumil" / "build.sbt").exists()
 
 lazy val eruHttpCoreRef: Option[ProjectRef] =
-  if (useLocalEruHttp) Some(ProjectRef(file("../eru-http"), "coreJVM")) else None
+  if (useLocalEruHttp) Some(ProjectRef(examplesDir / "eru-http", "coreJVM")) else None
 lazy val eruHttpServerRef: Option[ProjectRef] =
-  if (useLocalEruHttp) Some(ProjectRef(file("../eru-http"), "server")) else None
+  if (useLocalEruHttp) Some(ProjectRef(examplesDir / "eru-http", "server")) else None
 lazy val saratiRef: Option[ProjectRef] =
-  if (useLocalSarati) Some(ProjectRef(file("../sarati"), "root")) else None
+  if (useLocalSarati) Some(ProjectRef(examplesDir / "sarati", "root")) else None
 lazy val rumilParsersRef: Option[ProjectRef] =
-  if (useLocalRumil) Some(ProjectRef(file("../rumil"), "parsers")) else None
+  if (useLocalRumil) Some(ProjectRef(examplesDir / "rumil", "parsers")) else None
 
 // ===== Modules =====
 
@@ -146,11 +149,15 @@ lazy val openapi = (project in file("melian-openapi"))
     scalacOptions ++= sharedScalacOptions,
     libraryDependencies ++= Seq(
       "org.scalameta" %% "munit" % munitVersion % Test
+    ) ++ (
+      if (useLocalSarati) Seq.empty
+      else Seq("net.ghoula" %% "sarati" % saratiVersion)
     ),
     javaOptions ++= Seq("-XX:+UseZGC"),
     Test / fork := true
   )
   .dependsOn(core)
+  .configure(p => saratiRef.fold(p)(ref => p.dependsOn(ref)))
 
 lazy val server = (project in file("melian-server"))
   .settings(

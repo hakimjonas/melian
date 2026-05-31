@@ -1,10 +1,10 @@
 package net.ghoula.melian.router
 
-import net.ghoula.eru.http.{Body, Headers, Request}
-import net.ghoula.melian.RequestContext
-
 import java.net.InetAddress
 import java.util.UUID
+
+import net.ghoula.eru.http.{Body, Headers, Request}
+import net.ghoula.melian.RequestContext
 
 /** Concrete RequestContext built from a live HTTP request during dispatch. */
 final case class LiveRequestContext(

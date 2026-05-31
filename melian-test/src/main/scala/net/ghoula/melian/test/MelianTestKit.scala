@@ -22,15 +22,17 @@ object MelianTestKit {
     headers: List[(String, String)] = Nil
   ): Request[Body] = {
     val base = Request(method = method, uri = Uri.http("localhost", path = path), headers = Headers.empty, body = body)
-    headers.foldLeft[Eru[Any, Request[Body]]](Eru.succeed(base)) { case (acc, (name, value)) =>
-      acc.flatMap(_.addHeader(name, value))
-    }.unsafeRunSync()
+    headers
+      .foldLeft[Eru[Any, Request[Body]]](Eru.succeed(base)) { case (acc, (name, value)) =>
+        acc.flatMap(_.addHeader(name, value))
+      }
+      .unsafeRunSync()
   }
 
-  /** Extract the text body from a response, or fail. */
-  def bodyText(response: Response[Body]): String = response.body match {
-    case Body.Text(text, _, _) => text
-    case other => throw new AssertionError(s"Expected Text body, got: $other")
+  /** The text body of a response, or `None` if the body is not text. */
+  def bodyText(response: Response[Body]): Option[String] = response.body match {
+    case Body.Text(text, _, _) => Some(text)
+    case _ => None
   }
 
   /** Convenience for GET requests. */

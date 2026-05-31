@@ -2,114 +2,139 @@
 
 ## Current State (2026-04-17)
 
-**24 source files across 5 modules, 11 passing tests, zero warnings.**
+**35 source files across 5 modules, 57 passing tests, zero warnings.**
 
-All code is on `master` branch. Run `sbt "router/test"` to verify.
+All code is on `master` branch. Run `sbt testAll` to verify.
 
 ### What works end-to-end:
 
 ```scala
 val router = Router.builder
-  .get("/users/:id", (id: Path[UUID]) => Eru.succeed(Ok(s"user-$id")))
+  .get("/users/:id", (id: Path[UUID], page: Query["page", Int]) =>
+    Eru.succeed(Ok(s"user-$id page $page")))
   .post("/workspaces/:id", (id: Path[UUID], auth: Header[BearerToken], cmd: Json[CreateCommand]) =>
     Eru.succeed(Ok(Workspace(id, cmd.name))))
+  .get("/events/:id", (_: Path[UUID]) =>
+    Eru.succeed(EventStream(ServerSentEvent.toChunkStream(events))))
   .build
   .getOrElse(sys.error("route build failed"))
 
-// Mount on eru-http server:
-MelianServer.serve(router) { server => server.start.map(addr => println(s"Listening on $addr")) }
+// OpenAPI spec from compile-time metadata
+val spec = OpenApiSpec.generate(info, router.operationSchemas)
+
+// Serve with middleware stack
+val handler = SecurityHeaders.middleware()(
+  ErrorPages.middleware(ErrorPages.Config(buildDir))(
+    OpenApiRoutes.middleware(spec)(
+      StaticFiles.middleware(StaticFiles.Config(buildDir))(
+        router.toHandler
+      )
+    )
+  )
+)
+
+MelianServer.serve(router) { server =>
+  server.start.map(addr => println(s"Listening on $addr"))
+}
 ```
 
-- Compile-time macro pipeline: path parsing, handler introspection, method constraints, typeclass summoning
-- Arbitrary arity via `Apply(Select.unique(handler.asTerm, "apply"), args)` — no per-arity code
-- Error accumulation across all extractions (attempt + sequence + partition)
-- ErrorRenderer[E] for domain errors, RFC 9457 ProblemDetails for pipeline errors
-- ErrorSanitizer (dev/production modes)
-- SaratiBridge: BodyEncoder/BodyDecoder bridging Sarati↔eru-http
-- Endpoint/RequestContext with context function support
-- Content-Type validation, JSON depth guard (64 levels)
-- Created[A] with auto-derived Location header from path template
+### Complete feature set:
+
+- **Extraction**: Path[A], Query[N, A] (type-level names), Header[A], Json[A]
+- **Query params**: Required and optional (`Query["page", Option[Int]]`), multiple per route
+- **Validation**: Valar integration — `Validator[A]` summoned at compile time for every Json[A]
+- **Error handling**: Error accumulation across extractions, RFC 9457 ProblemDetails, 422 for validation
+- **Response types**: Ok, Created (auto Location header), Accepted, NoContent, EventStream
+- **SSE**: EventStream[ChunkStream] wired to eru-http Response.sse
+- **ErrorRenderer[E]**: Domain error → Response typeclass
+- **ErrorSanitizer**: Dev/production error detail modes
+- **OpenAPI 3.1**: Compile-time schema generation, runtime dedup, recursive type support
+- **Annotations**: @description, @example on case class fields → OpenAPI documentation
+- **Swagger UI**: OpenApiRoutes.middleware serves /openapi.json + /docs (CDN Swagger UI)
+- **Static files**: StaticFiles.middleware with media types, cache control, path traversal protection
+- **Security headers**: SecurityHeaders.middleware — HSTS, X-Frame-Options, nosniff, Referrer-Policy
+- **Custom error pages**: ErrorPages.middleware — serve 404.html, 500.html instead of JSON
+- **Compile error tests**: 6 assertions — method constraints, path mismatches, missing typeclasses
+- **Endpoint context**: RequestContext via context functions (?=>)
+- **Content-Type validation**: JSON depth guard (64 levels)
+- **Arbitrary arity**: Handler calls via AST Apply — no per-arity code
 
 ### Remaining asInstanceOf (2):
-1. `v.asInstanceOf[a]` — Result value extraction where `a` known from `Type[?]`. Caused by `List[MEru[Any]]` for `Eru.sequence`. Typed alternative blocked by Scala 3.8.3 compiler backend bug with deeply nested closures.
+1. `v.asInstanceOf[a]` — Result value extraction. Blocked by Scala 3.8.3 compiler backend bug.
 2. Context function boundary — `Endpoint` (`?=>`) to `Function1`. Scala language boundary, irreducible.
 
 ## What to Build Next
 
-### 1. Query[A] Extraction
-**Design needed.** The problem: query param names must come from somewhere. Options:
-- Add `paramName: String` to `FromQueryParam` trait (like `FromHeader.headerName`)
-- Require wrapper types: `case class Page(value: Int)` with `given FromQueryParam[Page]`
-- Use handler `def` parameter names (requires term-level tree inspection)
-- Type-level string: `Query[("page", Int)]` using named tuple syntax
+### 1. arda-web Migration (First Real Deployment)
 
-Most consistent with existing design: mirror FromHeader pattern with `paramName` in the typeclass.
+Replace the hand-rolled 200-line eru-http server at `/home/hakim/google/arda-web/server/` with Melian. The site is running at ardaproject.org (also localhost:8092). Everything needed is now in place:
+- StaticFiles middleware serves Rem's build output
+- SecurityHeaders middleware applies production security
+- ErrorPages middleware serves Rem-built 404.html
+- Clean URL routing via Router
 
-### 2. Valar Validator Integration
-The Girdle pipeline currently skips validation (Stage 6 in DESIGN.md). Wire `Validator[T]` from Valar into the Json body extraction, after Sarati decode. The SaratiBridge `decodeWithWarnings` already returns `DecodeResult[A]` — add validation step after decode. Valar is already a dependency of melian-router.
+### 2. eru-sqlite (First Database Integration)
 
-### 3. Database Integration (following eru-nats pattern)
-DESIGN.md Addendum A discusses persistence. The eru-nats pattern establishes conventions:
-- **Trait-based abstractions**: `DistributedQueue[T]`, `DistributedRefMap[K, V]`
-- **Eru effects** for all operations with typed error enums
-- **SaratiCodec** for serialization
-- **Scoped resources** via `bracket`
-- **Optimistic concurrency** via CAS retry loops
-- **Blocking interop** via `Eru.interruptibleBlocking`
+Standalone library following eru-nats patterns. See `/home/hakim/examples/eru-backend-libraries-plan.md` for full plan. Patterns: bracket lifecycle, typed error enum, `Eru.interruptibleBlocking`, `SaratiCodec`. This enables the Melian getting-started example with real persistence.
 
-For Melian examples and documentation, a simple persistence story is needed. Options from the design doc:
-- **Option A**: Multiple specific libraries (eru-redis, eru-postgres, eru-sqlite)
-- **Option B**: Shared trait library `eru-data` + backend implementations
-- **Option C**: Two levels — `eru-data` (KV, queue, CRUD) + Strongbow (relational queries)
+### 3. eru-postgres (Production Database)
 
-Pragmatic start: an `eru-data` module with in-memory implementations (for testing) and trait definitions that eru-nats-style backends can implement. Melian's examples use the traits, backends are pluggable.
+Same shape as eru-sqlite, production-grade. After this, Melian has a complete CRUD story.
 
-### 4. melian-openapi
-OpenAPI 3.1 spec generation from compile-time metadata. The macro already collects path templates, parameter types, request/response types. Needs:
-- Schema generation via Mirror traversal (like Valar/Sarati derivation)
-- Annotation support (@description, @example)
-- JSON spec materialization
-- Optional Swagger UI serving endpoint
+### 4. Further eru-* backends
 
-### 5. EventStream[A] / SSE
-eru-http has `Response.sse(events: ChunkStream)` and `ServerSentEvent`. Melian needs to wire `EventStream[A]` response type to encode events via Sarati and push through SSE.
+Redis (caching), MongoDB (documents), DynamoDB (ERM+ scheduler alternative), Neo4j (graph/Strongbow integration). Each 200-500 lines. See plan doc.
 
-### 6. Compile Error Tests
-Use munit's `compileErrors("""...""")` to assert:
-- GET with Json body → compile error
-- POST without body → compile error
-- Mismatched path param count → compile error
-- Missing typeclass → compile error with three-part format
+### 5. Melian Polish
+
+- OpenAPI: Content-Type negotiation, response headers in spec
+- Router: HEAD method auto-generation from GET routes
+- Testing: MelianTestKit improvements for easier endpoint testing
+- Performance: Benchmark against raw eru-http overhead
 
 ## Architecture Notes
 
-- **eru-http** owns HTTP protocol — Melian delegates via `Response.*` factories and `BodyEncoder`/`BodyDecoder`
-- **SaratiBridge** (60 lines) is the only integration point between Sarati/Rumil and eru-http
-- **Markers are transparent type aliases** (`type Path[A] = A`) — not opaque types
-- **Macro uses `Apply(Select.unique(...), args)`** for handler calls — works for any arity
-- **Error accumulation uses `Eru.attempt`** — the Eru-native way to lift errors into values
-- **`Type[?]` crosses quote boundaries**, `TypeRepr` does not — critical for recursive macro generation
+- **Markers are transparent type aliases** (`type Path[A] = A`, `type Query[N, A] = A`)
+- **Query[N, A]** uses type-level string literal for param name — `Query["page", Int]`
+- **Macro uses `Apply(Select.unique(...), args)`** for handler calls — any arity
+- **SchemaGen** traverses TypeRepr at compile time with visited set for recursive types
+- **OpenAPI schemas** are TypeSchema ADTs — macro generates them, runtime deduplicates
+- **Error accumulation uses `Eru.attempt`** — the Eru-native error-as-value pattern
+- **`Type[?]` crosses quote boundaries**, `TypeRepr` does not
+- **Middleware composes as handler wrappers** — `(Request => Eru[E, Response]) => (Request => Eru[E, Response])`
 - **Router takes `ErrorSanitizer` via given** — defaults to development mode
+- **Bracket nesting** for resource lifecycle — outer acquires DB, inner runs server
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `melian-router/…/RouteMacros.scala` | The macro engine (~250 lines) |
-| `melian-router/…/SaratiBridge.scala` | Sarati↔eru-http bridge (~60 lines) |
+| `melian-router/…/RouteMacros.scala` | The macro engine (~460 lines) |
+| `melian-router/…/SchemaGen.scala` | Compile-time OpenAPI schema generation |
+| `melian-router/…/SaratiBridge.scala` | Sarati↔eru-http bridge (~110 lines) |
 | `melian-router/…/HandlerIntrospection.scala` | TypeRepr analysis |
 | `melian-router/…/Router.scala` | Dispatch + error rendering |
 | `melian-core/…/Markers.scala` | Transparent type aliases |
-| `melian-core/…/ErrorRenderer.scala` | Domain error → Response typeclass |
+| `melian-core/…/schema/TypeSchema.scala` | Schema descriptor ADTs |
+| `melian-core/…/schema/OperationSchema.scala` | Route metadata types |
+| `melian-core/…/schema/Annotations.scala` | @description, @example |
 | `melian-core/…/extraction/` | FromPathSegment, FromQueryParam, FromHeader |
+| `melian-openapi/…/OpenApiSpec.scala` | OpenAPI 3.1 JSON generation |
+| `melian-openapi/…/OpenApiRoutes.scala` | Spec + Swagger UI endpoint handlers |
+| `melian-openapi/…/ComponentRegistry.scala` | Schema deduplication |
 | `melian-server/…/MelianServer.scala` | Bridge to eru-http HttpServer |
+| `melian-server/…/StaticFiles.scala` | Static file serving middleware |
+| `melian-server/…/SecurityHeaders.scala` | Security headers middleware |
+| `melian-server/…/ErrorPages.scala` | Custom error page middleware |
+
+## Ecosystem Context
+
+- **Rem** (Dart) builds HTML; **Melian** (Scala) serves it. Independent projects that compose at deployment.
+- **Strongbow** — type-safe columnar query engine. Future: Melian endpoint → Strongbow plan → interpreter.
+- **eru-nats** — template for all eru-* backend integrations (bracket, typed errors, interruptibleBlocking).
+- **Valar** — validation, already integrated into Melian's Json body pipeline.
+- **Persistence**: Standalone eru-* libraries per backend (ZIO pattern). No shared abstraction layer.
 
 ## Memory Files
-All context is persisted in `/home/hakim/.claude/projects/-home-hakim-examples-melian/memory/`. Key entries:
-- `reference_eru_http.md` — eru-http types and APIs
-- `reference_sarati.md` — Sarati codecs and AST types
-- `reference_rumil.md` — Rumil parser combinators
-- `reference_valar.md` — Valar validation patterns and macro derivation
-- `reference_eru_api.md` — Eru combinators to use
-- `project_security_audit.md` — known security gaps and status
-- `feedback_scala_style.md` — brace syntax, FP, pattern matching preferences
+All context persisted in `/home/hakim/.claude/projects/-home-hakim-examples-melian/memory/`.
+Ecosystem-level plan at `/home/hakim/examples/eru-backend-libraries-plan.md`.

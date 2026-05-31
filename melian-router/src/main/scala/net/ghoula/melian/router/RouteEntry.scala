@@ -3,8 +3,10 @@ package net.ghoula.melian.router
 import net.ghoula.eru.Eru
 import net.ghoula.eru.http.*
 import net.ghoula.melian.RequestError
+import net.ghoula.melian.schema.OperationSchema
 
-/** A single compiled route: path template, HTTP method, and the fully generated handler.
+/** A single compiled route: path template, HTTP method, the fully generated handler, and
+  * compile-time schema metadata for OpenAPI generation.
   *
   * The handler receives the raw request and path parameter values extracted by the trie. It
   * encapsulates the entire Girdle pipeline (extraction, decoding, validation, business logic,
@@ -13,5 +15,6 @@ import net.ghoula.melian.RequestError
 final case class RouteEntry(
   pathTemplate: String,
   method: Method,
-  handler: (Request[Body], Map[String, String]) => Eru[RequestError | HttpError, Response[Body]]
+  handler: (Request[Body], Map[String, String]) => Eru[RequestError | HttpError, Response[Body]],
+  schema: OperationSchema
 )

@@ -2,8 +2,8 @@ package net.ghoula.melian
 
 /** Source markers for endpoint parameters.
   *
-  * Transparent type aliases that instruct the compile-time macro where to source each parameter.
-  * At compile time the macro inspects TypeRepr to find these markers and determine extraction
+  * Transparent type aliases that instruct the compile-time macro where to source each parameter. At
+  * compile time the macro inspects TypeRepr to find these markers and determine extraction
   * strategy. At runtime they are identity — Path[UUID] IS UUID, no wrapping or unwrapping.
   *
   * This eliminates asInstanceOf at the handler call boundary: the macro extracts a UUID, and the
@@ -11,7 +11,7 @@ package net.ghoula.melian
   */
 
 type Path[A] = A
-type Query[A] = A
+type Query[N <: String & Singleton, A] = A
 type Header[A] = A
 
 /** Body decoded via Rumil JSON parse -> Sarati decode -> Valar validate. JSON only. */

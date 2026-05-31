@@ -25,12 +25,15 @@ final class Router private[router] (
         }
 
       case RouteTrie.LookupResult.Matched(entry, pathParams) =>
-        entry.handler(request, pathParams).recoverWith {
-          case e: RequestError => Eru.succeed(renderRequestError(e))
-        }.mapError {
-          case e: HttpError => e
-          case e => HttpError.ProtocolError(e.toString, "unexpected")
-        }
+        entry
+          .handler(request, pathParams)
+          .recoverWith { case e: RequestError =>
+            Eru.succeed(renderRequestError(e))
+          }
+          .mapError {
+            case e: HttpError => e
+            case e => HttpError.ProtocolError(e.toString, "unexpected")
+          }
     }
   }
 
@@ -42,6 +45,8 @@ object Router {
 
   def builder: RouterBuilder = RouterBuilder()
 
-  def fromRoutes(routes: Vector[RouteEntry])(using sanitizer: net.ghoula.melian.ErrorSanitizer): Either[String, Router] =
+  def fromRoutes(routes: Vector[RouteEntry])(using
+    sanitizer: net.ghoula.melian.ErrorSanitizer
+  ): Either[String, Router] =
     RouteTrie.build(routes).map(trie => new Router(trie, sanitizer))
 }

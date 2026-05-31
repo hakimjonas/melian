@@ -1,9 +1,9 @@
 package net.ghoula.melian.extraction
 
+import java.util.UUID
+
 import net.ghoula.eru.Eru
 import net.ghoula.melian.{ExtractionError, ExtractionSource}
-
-import java.util.UUID
 
 /** Parse a URI path segment string into a typed value. */
 trait FromPathSegment[A] {

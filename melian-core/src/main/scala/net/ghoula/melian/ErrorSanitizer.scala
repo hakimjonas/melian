@@ -20,11 +20,15 @@ object ErrorSanitizer {
   val production: ErrorSanitizer = new ErrorSanitizer {
     def sanitize(error: RequestError): RequestError = error match {
       case RequestError.ExtractionFailed(errors) =>
-        RequestError.ExtractionFailed(errors.map(e => e.copy(
-          message = genericMessage(e.source),
-          expected = None,
-          actual = None
-        )))
+        RequestError.ExtractionFailed(
+          errors.map(e =>
+            e.copy(
+              message = genericMessage(e.source),
+              expected = None,
+              actual = None
+            )
+          )
+        )
       case RequestError.ParseFailed(_) =>
         RequestError.ParseFailed(List("Malformed request body"))
       case RequestError.DecodeFailed(_) =>
