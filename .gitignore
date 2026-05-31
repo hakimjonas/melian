@@ -42,6 +42,7 @@ build/
 
 ### Scala ###
 .bsp/
+.metals/
 *.semanticdb
 
 ### Debug/Test Files ###
