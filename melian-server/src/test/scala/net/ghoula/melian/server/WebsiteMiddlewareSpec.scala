@@ -160,8 +160,59 @@ class WebsiteMiddlewareSpec extends FunSuite {
     assert(v.contains("style-src 'self' 'unsafe-inline'"))
     assert(v.contains("object-src 'none'"))
     assert(v.contains("frame-ancestors 'none'"))
+    // form-action defaults to 'none' (no <form> may submit anywhere).
+    assert(v.contains("form-action 'none'"))
     // Empty directives are omitted.
     assert(!v.contains("img-src"))
+  }
+
+  test("Csp renders the extended directive set when set") {
+    val csp = SecurityHeaders.Csp.selfOnly
+      .withFrameSrc("'none'")
+      .withWorkerSrc("'self'")
+      .withManifestSrc("'self'")
+      .withMediaSrc("'self'")
+      .withFormAction("'self'")
+    val v = csp.value
+    assert(v.contains("frame-src 'none'"))
+    assert(v.contains("worker-src 'self'"))
+    assert(v.contains("manifest-src 'self'"))
+    assert(v.contains("media-src 'self'"))
+    assert(v.contains("form-action 'self'"))
+  }
+
+  test("strict-dynamic is off by default and prepends to script-src when enabled") {
+    val off = SecurityHeaders.Csp.selfOnly.withScriptSrc("'self'")
+    assert(!off.value.contains("'strict-dynamic'"))
+
+    val on = SecurityHeaders.Csp.selfOnly.withScriptSrc("'self'").withStrictDynamic()
+    assert(on.value.contains("script-src 'strict-dynamic' 'self'"))
+  }
+
+  test("strict-dynamic is omitted when script-src is empty") {
+    val csp = SecurityHeaders.Csp.selfOnly.withStrictDynamic()
+    assert(!csp.value.contains("'strict-dynamic'"))
+    assert(!csp.value.contains("script-src"))
+  }
+
+  test("Cross-Origin-Resource-Policy and Cross-Origin-Opener-Policy are opt-in") {
+    val inner: Request[Body] => Eru[HttpError, Response[Body]] = { _ =>
+      Eru.succeed(Response(StatusCode.Ok, Headers.empty, Body.text("ok")))
+    }
+
+    val defaultHandler = SecurityHeaders.middleware()(inner)
+    val defaultResp = defaultHandler(get("/")).unsafeRunSync()
+    assert(defaultResp.headers.getFirst("Cross-Origin-Resource-Policy").isEmpty)
+    assert(defaultResp.headers.getFirst("Cross-Origin-Opener-Policy").isEmpty)
+
+    val config = SecurityHeaders.Config(
+      crossOriginResourcePolicy = Some("same-origin"),
+      crossOriginOpenerPolicy = Some("same-origin")
+    )
+    val handler = SecurityHeaders.middleware(config)(inner)
+    val response = handler(get("/")).unsafeRunSync()
+    assert(response.headers.getFirst("Cross-Origin-Resource-Policy").exists(_.value == "same-origin"))
+    assert(response.headers.getFirst("Cross-Origin-Opener-Policy").exists(_.value == "same-origin"))
   }
 
   // --- ErrorPages ---
