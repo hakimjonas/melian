@@ -1,0 +1,48 @@
+name: Bug report
+description: Report incorrect or unexpected behavior
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening an issue, check the [README](../README.md) to confirm the behavior is unexpected.
+
+  - type: input
+    id: version
+    attributes:
+      label: melian version
+      placeholder: e.g. 1.0.0-alpha
+    validations:
+      required: true
+
+  - type: input
+    id: scala-jdk
+    attributes:
+      label: Scala and JDK
+      placeholder: e.g. Scala 3.8.4, JDK 25
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Describe the behavior you observed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: A self-contained snippet that shows the problem.
+      render: scala
+    validations:
+      required: true

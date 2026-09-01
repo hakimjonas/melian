@@ -13,6 +13,10 @@ object ProblemDetails {
 
   private val problemJsonMediaType: MediaType = MediaType("application", "problem+json")
 
+  /* 422 Unprocessable Content is not in eru-http's StatusCode set, so it is
+   * constructed through the validating `apply` (the code is constant and valid). */
+  private val UnprocessableContent: StatusCode = StatusCode(422).unsafeRunSync()
+
   def render(error: RequestError): Response[Body] = {
     val (status, json) = error match {
       case RequestError.ExtractionFailed(errors) =>
@@ -22,7 +26,7 @@ object ProblemDetails {
       case RequestError.DecodeFailed(errors) =>
         (StatusCode.BadRequest, decodeErrors(errors))
       case RequestError.ValidationFailed(errors) =>
-        (StatusCode.UnprocessableEntity, validationErrors(errors))
+        (UnprocessableContent, validationErrors(errors))
       case RequestError.BodyMissing =>
         (StatusCode.BadRequest, simple("Bad Request", "Request body is required"))
       case RequestError.UnsupportedMediaType(expected, actual) =>

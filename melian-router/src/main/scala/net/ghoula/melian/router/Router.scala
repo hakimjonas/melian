@@ -17,7 +17,7 @@ final class Router private[router] (
   def toHandler: Request[Body] => Eru[HttpError, Response[Body]] = { (request: Request[Body]) =>
     trie.lookup(request.uri.path, request.method) match {
       case RouteTrie.LookupResult.NotFound =>
-        Eru.succeed(Response.notFound(Body.text(s"Not Found: ${request.uri.path}")))
+        Eru.succeed(Response(StatusCode.NotFound, Headers.empty, Body.text(s"Not Found: ${request.uri.path}")))
 
       case RouteTrie.LookupResult.MethodNotAllowed(allowed) =>
         Response.methodNotAllowed(allowed).mapError { e =>

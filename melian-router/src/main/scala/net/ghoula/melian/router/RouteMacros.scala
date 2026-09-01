@@ -478,8 +478,10 @@ object RouteMacros {
     import net.ghoula.eru.http.*
     (response: Any) match {
       case ok: net.ghoula.melian.Ok[B @unchecked] =>
-        Response.okEncoded(ok.body)(using encoder).mapError { err =>
-          HttpError.BodyEncodeError(err): ErrType
+        Response.ok(Body.Empty).withEncodedBody(ok.body)(using encoder).mapError {
+          case err: EncodeError => HttpError.BodyEncodeError(err): ErrType
+          case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
+            HttpError.InvalidResponse(InvalidResponse(err.toString, "Content-Type header")): ErrType
         }
       case _: net.ghoula.melian.NoContent.type =>
         Eru.succeed(Response.noContent)
@@ -506,9 +508,13 @@ object RouteMacros {
               }
           }
       case accepted: net.ghoula.melian.Accepted[B @unchecked] =>
-        Response.acceptedEncoded(accepted.body)(using encoder).mapError { err =>
-          HttpError.BodyEncodeError(err): ErrType
-        }
+        Response(StatusCode.Accepted, Headers.empty, Body.Empty)
+          .withEncodedBody(accepted.body)(using encoder)
+          .mapError {
+            case err: EncodeError => HttpError.BodyEncodeError(err): ErrType
+            case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
+              HttpError.InvalidResponse(InvalidResponse(err.toString, "Content-Type header")): ErrType
+          }
       case _ =>
         Eru.succeed(Response(StatusCode.Ok, Headers.empty, Body.text(response.toString)))
     }

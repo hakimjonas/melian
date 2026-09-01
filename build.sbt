@@ -1,59 +1,42 @@
-ThisBuild / scalaVersion := "3.8.3"
+ThisBuild / scalaVersion := "3.8.4"
 ThisBuild / organization := "net.ghoula"
 ThisBuild / organizationName := "Hakim Jonas Ghoula"
 ThisBuild / versionScheme := Some("early-semver")
 ThisBuild / semanticdbEnabled := true
 ThisBuild / semanticdbVersion := scalafixSemanticdb.revision
 
-ThisBuild / licenses := List("MIT" -> url("https://opensource.org/licenses/MIT"))
-ThisBuild / homepage := Some(url("https://codeberg.org/hakim/melian"))
+ThisBuild / licenses := Seq("GPL-3.0-or-later" -> url("https://www.gnu.org/licenses/gpl-3.0.txt"))
+ThisBuild / homepage := Some(url("https://github.com/hakimjonas/melian"))
 ThisBuild / description := "A zero-reflection, compile-time web framework for Scala 3 built on the Arda ecosystem"
 ThisBuild / developers := List(
   Developer(
     id = "hakimjonas",
     name = "Hakim Jonas Ghoula",
     email = "hakim@ghoula.net",
-    url = url("https://codeberg.org/hakim")
+    url = url("https://github.com/hakimjonas")
   )
 )
 ThisBuild / scmInfo := Some(
   ScmInfo(
-    url("https://codeberg.org/hakim/melian"),
-    "scm:git@codeberg.org:hakim/melian.git"
+    url("https://github.com/hakimjonas/melian"),
+    "scm:git@github.com:hakimjonas/melian.git"
   )
 )
 
 // ===== Publishing Settings =====
-val forgejoHost: String = sys.env.getOrElse("FORGEJO_HOST", "localhost")
-val forgejoUrl: String = s"http://$forgejoHost:3000"
-
+//
+// Maven Central (Central Portal) is the single publication target. Releases are staged locally
+// and uploaded with `sonaRelease` (sbt 2.x built-in Central Portal support); artifacts are signed
+// by sbt-pgp (`publishSigned`). Credentials are read automatically from SONATYPE_USERNAME /
+// SONATYPE_PASSWORD.
 ThisBuild / publishTo := {
-  if (sys.env.contains("CODEBERG_TOKEN"))
-    Some("codeberg" at "https://codeberg.org/api/packages/hakim/maven")
-  else
-    Some(("local-forgejo" at s"$forgejoUrl/api/packages/hakim/maven").withAllowInsecureProtocol(true))
+  val centralSnapshots = "https://central.sonatype.com/repository/maven-snapshots/"
+  if (isSnapshot.value) Some("central-snapshots" at centralSnapshots)
+  else localStaging.value
 }
 ThisBuild / publishMavenStyle := true
+ThisBuild / pomIncludeRepository := { _ => false }
 ThisBuild / Test / publishArtifact := false
-
-ThisBuild / resolvers ++= Seq(
-  "codeberg" at "https://codeberg.org/api/packages/hakim/maven",
-  ("local-forgejo" at s"$forgejoUrl/api/packages/hakim/maven").withAllowInsecureProtocol(true)
-)
-
-ThisBuild / credentials ++= sys.env
-  .get("CODEBERG_TOKEN")
-  .map { token =>
-    Credentials("Gitea Package API", "codeberg.org", "hakim", token)
-  }
-  .toSeq
-
-ThisBuild / credentials ++= sys.env
-  .get("FORGEJO_TOKEN")
-  .map { token =>
-    Credentials("Gitea Package API", forgejoHost, "hakim", token)
-  }
-  .toSeq
 
 // ===== Compiler Settings =====
 javacOptions ++= Seq("--release", "25")
@@ -73,29 +56,11 @@ val sharedScalacOptions: Seq[String] = Seq(
 )
 
 // ===== Dependency Versions =====
-val eruVersion: String = "0.9.0+4-2c37ef6b"
-val eruHttpVersion: String = "0.1.0-SNAPSHOT"
-val saratiVersion: String = "0.2.2"
-val rumilVersion: String = "0.3.0"
+val eruHttpVersion: String = "1.0.0-alpha"
+val saratiVersion: String = "1.0.0-alpha"
+val rumilVersion: String = "1.0.0-alpha"
 val valarVersion: String = "0.6.0"
-val munitVersion: String = "1.2.3"
-
-// ===== Local Project References =====
-// Use absolute path so these resolve correctly even when loaded via ProjectRef from another build
-val examplesDir: File = file("/home/hakim/examples")
-
-val useLocalEruHttp: Boolean = (examplesDir / "eru-http" / "build.sbt").exists()
-val useLocalSarati: Boolean = (examplesDir / "sarati" / "build.sbt").exists()
-val useLocalRumil: Boolean = (examplesDir / "rumil" / "build.sbt").exists()
-
-lazy val eruHttpCoreRef: Option[ProjectRef] =
-  if (useLocalEruHttp) Some(ProjectRef(examplesDir / "eru-http", "coreJVM")) else None
-lazy val eruHttpServerRef: Option[ProjectRef] =
-  if (useLocalEruHttp) Some(ProjectRef(examplesDir / "eru-http", "server")) else None
-lazy val saratiRef: Option[ProjectRef] =
-  if (useLocalSarati) Some(ProjectRef(examplesDir / "sarati", "root")) else None
-lazy val rumilParsersRef: Option[ProjectRef] =
-  if (useLocalRumil) Some(ProjectRef(examplesDir / "rumil", "parsers")) else None
+val munitVersion: String = "1.3.5"
 
 // ===== Modules =====
 
@@ -104,19 +69,11 @@ lazy val core = (project in file("melian-core"))
     name := "melian-core",
     scalacOptions ++= sharedScalacOptions,
     libraryDependencies ++= Seq(
+      "net.ghoula" %% "eru-http-core" % eruHttpVersion,
       "org.scalameta" %% "munit" % munitVersion % Test
-    ) ++ (
-      if (useLocalEruHttp) Seq.empty
-      else Seq("net.ghoula" % "eru-http-core_3" % eruHttpVersion)
     ),
     javaOptions ++= Seq("-XX:+UseZGC"),
     Test / fork := true
-  )
-  .configure(p =>
-    eruHttpCoreRef match {
-      case Some(ref) => p.dependsOn(ref)
-      case None => p
-    }
   )
 
 lazy val router = (project in file("melian-router"))
@@ -124,58 +81,41 @@ lazy val router = (project in file("melian-router"))
     name := "melian-router",
     scalacOptions ++= sharedScalacOptions,
     libraryDependencies ++= Seq(
+      "net.ghoula" %% "sarati" % saratiVersion,
+      "net.ghoula" %% "rumil-parsers" % rumilVersion,
+      "net.ghoula" %% "valar-core" % valarVersion,
       "org.scalameta" %% "munit" % munitVersion % Test
-    ) ++ (
-      if (useLocalSarati) Seq.empty
-      else Seq("net.ghoula" %% "sarati" % saratiVersion)
-    ) ++ (
-      if (useLocalRumil) Seq.empty
-      else Seq("net.ghoula" %% "rumil-parsers" % rumilVersion)
-    ) ++ Seq(
-      "net.ghoula" % "valar-core_3" % valarVersion
     ),
     javaOptions ++= Seq("-XX:+UseZGC"),
     Test / fork := true
   )
   .dependsOn(core)
-  .configure(p => {
-    val withSarati = saratiRef.fold(p)(ref => p.dependsOn(ref))
-    rumilParsersRef.fold(withSarati)(ref => withSarati.dependsOn(ref))
-  })
 
 lazy val openapi = (project in file("melian-openapi"))
   .settings(
     name := "melian-openapi",
     scalacOptions ++= sharedScalacOptions,
     libraryDependencies ++= Seq(
+      "net.ghoula" %% "sarati" % saratiVersion,
       "org.scalameta" %% "munit" % munitVersion % Test
-    ) ++ (
-      if (useLocalSarati) Seq.empty
-      else Seq("net.ghoula" %% "sarati" % saratiVersion)
     ),
     javaOptions ++= Seq("-XX:+UseZGC"),
     Test / fork := true
   )
   .dependsOn(core)
-  .configure(p => saratiRef.fold(p)(ref => p.dependsOn(ref)))
 
 lazy val server = (project in file("melian-server"))
   .settings(
     name := "melian-server",
     scalacOptions ++= sharedScalacOptions,
     libraryDependencies ++= Seq(
+      "net.ghoula" %% "eru-http-server" % eruHttpVersion,
       "org.scalameta" %% "munit" % munitVersion % Test
     ),
     javaOptions ++= Seq("-XX:+UseZGC"),
     Test / fork := true
   )
   .dependsOn(core, router)
-  .configure(p =>
-    eruHttpServerRef match {
-      case Some(ref) => p.dependsOn(ref)
-      case None => p
-    }
-  )
 
 lazy val testKit = (project in file("melian-test"))
   .settings(
@@ -199,3 +139,4 @@ lazy val root = (project in file("."))
 // ===== Command Aliases =====
 addCommandAlias("testAll", "test")
 addCommandAlias("prepare", "scalafmtAll; scalafmtSbt; scalafixAll")
+addCommandAlias("check", "scalafixAll --check; scalafmtCheckAll; scalafmtSbtCheck")

@@ -1,0 +1,70 @@
+name: Auto-tag pre-release
+
+# On every merge of a PR into main, cut the next pre-release tag so the tag
+# push triggers release.yml, which tests and publishes the clean, tag-derived
+# version to Maven Central.
+#
+# Version policy (alpha line):
+#   v1.0.0-alpha     -> v1.0.0-alpha.1
+#   v1.0.0-alpha.1   -> v1.0.0-alpha.2
+# Anything other than an alpha pre-release (e.g. a stable v1.0.0) is skipped
+# defensively: stable releases are tagged manually.
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  cut-release:
+    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Compute and push the next alpha tag
+        env:
+          # RELEASE_TOKEN is a repo secret with write access (a PAT). The
+          # default GITHUB_TOKEN must not be used here: GitHub suppresses
+          # workflow runs triggered by the built-in token, so the tag push
+          # would not start release.yml.
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          latest=$(git ls-remote --tags --sort=-v:refname origin 'refs/tags/v*' \
+            | grep -v '\^{}' | head -n 1 | sed 's|.*refs/tags/||')
+
+          if [ -z "$latest" ]; then
+            echo "No existing version tags — skipping (tag the first release manually)."
+            exit 0
+          fi
+
+          body="${latest#v}"
+          case "$body" in
+            *-alpha.*)
+              base="${body%-alpha.*}"
+              n="${body##*-alpha.}"
+              next="${base}-alpha.$((n + 1))"
+              ;;
+            *-alpha)
+              next="${body}.1"
+              ;;
+            *)
+              echo "Latest tag ${latest} is not an alpha pre-release — skipping."
+              exit 0
+              ;;
+          esac
+          newtag="v${next}"
+
+          if git ls-remote --tags origin "refs/tags/${newtag}" | grep -q "refs/tags/${newtag}$"; then
+            echo "Tag ${newtag} already exists — nothing to do."
+            exit 0
+          fi
+
+          git config user.name "melian-release-bot"
+          git config user.email "release@melian.local"
+          git tag "${newtag}"
+          git push "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${newtag}"
+
+          echo "Pushed ${newtag} — release.yml will now build, test, and publish it."

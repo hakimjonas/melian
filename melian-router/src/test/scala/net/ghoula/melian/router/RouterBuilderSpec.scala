@@ -420,7 +420,7 @@ class RouterBuilderSpec extends FunSuite {
       value match {
         case JsonValue.Object(fields) =>
           (fields.get("name"), fields.get("count")) match {
-            case (Some(JsonValue.Str(n)), Some(JsonValue.Number(c))) =>
+            case (Some(JsonValue.Str(n)), Some(JsonValue.Number(c, _))) =>
               net.ghoula.sarati.Result.Success(ValidatedCommand(n, c.toInt), 0)
             case _ =>
               net.ghoula.sarati.Result.Failure(
@@ -496,7 +496,7 @@ class RouterBuilderSpec extends FunSuite {
       )
     )
 
-    assertEquals(response.status, StatusCode.UnprocessableEntity)
+    assertEquals(response.status, StatusCode(422).unsafeRunSync())
     val body = bodyText(response)
     assert(body.contains("Unprocessable Entity"), s"Missing title: $body")
     assert(body.contains("name"), s"Missing field path for name: $body")

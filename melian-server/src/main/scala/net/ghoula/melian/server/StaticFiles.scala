@@ -21,17 +21,17 @@ object StaticFiles {
   private val mediaTypes: Map[String, MediaType] = Map(
     "html" -> MediaType.textHtml.withCharset("utf-8"),
     "css" -> MediaType.textCss.withCharset("utf-8"),
-    "js" -> MediaType.textJavascript.withCharset("utf-8"),
-    "mjs" -> MediaType.textJavascript.withCharset("utf-8"),
+    "js" -> MediaType("text", "javascript").withCharset("utf-8"),
+    "mjs" -> MediaType("text", "javascript").withCharset("utf-8"),
     "json" -> MediaType.applicationJson,
     "xml" -> MediaType.applicationXml,
-    "svg" -> MediaType.imageSvgXml,
+    "svg" -> MediaType("image", "svg+xml"),
     "png" -> MediaType.imagePng,
     "jpg" -> MediaType.imageJpeg,
     "jpeg" -> MediaType.imageJpeg,
-    "webp" -> MediaType.imageWebp,
+    "webp" -> MediaType("image", "webp"),
     "gif" -> MediaType.imageGif,
-    "ico" -> MediaType.imageIcon,
+    "ico" -> MediaType("image", "x-icon"),
     "wasm" -> MediaType("application", "wasm"),
     "woff" -> MediaType("font", "woff"),
     "woff2" -> MediaType("font", "woff2"),
@@ -94,7 +94,8 @@ object StaticFiles {
       case None => Eru.succeed(None)
       case Some((mediaType, bytes)) =>
         val body =
-          if mediaType.isText || mediaType.subType == "svg+xml" then Body.text(String(bytes, "UTF-8"), mediaType)
+          if mediaType.mainType == "text" || mediaType.subType == "json" || mediaType.subType == "xml" || mediaType.subType == "svg+xml"
+          then Body.text(String(bytes, "UTF-8"), mediaType)
           else Body.binary(Bytes.fromArray(bytes), mediaType)
         val response = Response.ok(body)
         response
