@@ -23,6 +23,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # Do not persist the GITHUB_TOKEN: the tag push below authenticates with
+          # RELEASE_TOKEN, and a persisted token would override those credentials.
+          persist-credentials: false
 
       - name: Compute and push the next alpha tag
         env:
@@ -32,6 +35,14 @@ jobs:
           # would not start release.yml.
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
+          # Never cut a tag for a commit that already carries one. This also
+          # prevents two tags from pointing at the same commit, which would make
+          # sbt-dynver's `git describe` ambiguous about the version.
+          if git describe --tags --exact-match HEAD >/dev/null 2>&1; then
+            echo "HEAD is already tagged — nothing to do."
+            exit 0
+          fi
+
           latest=$(git ls-remote --tags --sort=-v:refname origin 'refs/tags/v*' \
             | grep -v '\^{}' | head -n 1 | sed 's|.*refs/tags/||')
 
