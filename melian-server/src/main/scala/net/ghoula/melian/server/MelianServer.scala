@@ -9,11 +9,11 @@ import net.ghoula.melian.router.Router
 /** Entry point for running a Melian router as an HTTP server.
   *
   * Bridges Router to eru-http's HttpServer, composing with eru-http's middleware stack. Melian does
-  * not define its own middleware — it uses eru-http's Middleware type directly.
+  * not define its own middleware; it uses eru-http's Middleware type directly.
   *
   * Bracket-scoped external resources (database pools, message brokers) compose naturally by
   * nesting: the outer bracket acquires the resource, the inner bracket runs the server. On
-  * shutdown, the server closes first, then the resource — correct ordering by construction.
+  * shutdown, the server closes first, then the resource: correct ordering by construction.
   *
   * @example
   *   {{{

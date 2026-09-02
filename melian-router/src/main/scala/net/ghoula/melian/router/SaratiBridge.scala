@@ -13,8 +13,8 @@ import net.ghoula.sarati.codec.{Decoder, Encoder}
   *
   * Two levels of integration:
   *   - BodyEncoder/BodyDecoder: standard eru-http givens for simple encode/decode
-  *   - decodeWithWarnings: richer function preserving partial-success warnings from Rumil and
-  *     Sarati, used by Melian's Girdle pipeline to surface diagnostics via RequestContext.warnings
+  *   - decodeJsonBody: richer function preserving partial-success warnings from Rumil and Sarati,
+  *     surfaced to Endpoint handlers through RequestContext.warnings
   */
 object SaratiBridge {
 
@@ -34,10 +34,7 @@ object SaratiBridge {
 
   // --- BodyDecoder: Body → String → JsonValue → A (standard eru-http, drops warnings) ---
 
-  given jsonBodyDecoder[A](using
-    sarati: Decoder[JsonValue, A],
-    textDecoder: BodyDecoder[String]
-  ): BodyDecoder[A] with {
+  given jsonBodyDecoder[A](using sarati: Decoder[JsonValue, A]): BodyDecoder[A] with {
     def decode(body: Body): Eru[DecodeError, A] =
       decodeJsonBody(body).map(_.value)
 
@@ -65,10 +62,9 @@ object SaratiBridge {
   // --- Richer decode preserving warnings (Girdle pipeline) ---
 
   def decodeJsonBody[A](body: Body)(using
-    sarati: Decoder[JsonValue, A],
-    textDecoder: BodyDecoder[String]
+    sarati: Decoder[JsonValue, A]
   ): Eru[DecodeError, DecodeResult[A]] =
-    textDecoder.decode(body).flatMap { text =>
+    CodedBody.readText(body).flatMap { text =>
       parseJson(text) match {
         case RumilResult.Success(json, _) =>
           guardDepth(json).flatMap(j => decodeSarati(j, Nil))

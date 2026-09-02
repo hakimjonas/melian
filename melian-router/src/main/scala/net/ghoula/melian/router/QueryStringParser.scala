@@ -3,7 +3,12 @@ package net.ghoula.melian.router
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 
-/** Parses and URL-decodes a raw URI query string into key-value pairs. */
+/** Parses and percent-decodes a raw URI query string into key-value pairs.
+  *
+  * The query component uses percent-encoding per RFC 3986, where `+` is a literal plus character.
+  * This differs from `application/x-www-form-urlencoded`, where `+` means space; form bodies are
+  * decoded by [[net.ghoula.melian.router.FormBody]] with the form semantics instead.
+  */
 object QueryStringParser {
 
   def parse(query: String): Map[String, String] = query match {
@@ -24,5 +29,6 @@ object QueryStringParser {
   }
 
   private def decode(s: String): String =
-    URLDecoder.decode(s, StandardCharsets.UTF_8)
+    try URLDecoder.decode(s.replace("+", "%2B"), StandardCharsets.UTF_8)
+    catch { case _: IllegalArgumentException => s }
 }

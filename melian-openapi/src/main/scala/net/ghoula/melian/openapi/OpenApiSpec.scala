@@ -10,7 +10,12 @@ import net.ghoula.sarati.ast.json.JsonValue
   */
 object OpenApiSpec {
 
-  final case class Info(title: String, version: String, description: Option[String] = None)
+  final case class Info(
+    title: String,
+    version: String,
+    description: Option[String] = None,
+    servers: List[String] = Nil
+  )
 
   def generate(info: Info, operations: Vector[OperationSchema]): JsonValue = {
     val components = ComponentRegistry.from(operations)
@@ -20,13 +25,15 @@ object OpenApiSpec {
       Map(
         "openapi" -> JsonValue.Str("3.1.0"),
         "info" -> buildInfo(info),
-        "paths" -> paths
-      ) ++ (
-        if components.schemas.isEmpty then Map.empty
-        else Map("components" -> buildComponents(components))
-      )
+        "paths" -> paths,
+        "components" -> buildComponents(components)
+      ) ++ buildServers(info.servers).map(s => "servers" -> s)
     )
   }
+
+  private def buildServers(servers: List[String]): Option[JsonValue] =
+    if servers.isEmpty then None
+    else Some(JsonValue.Array(servers.map(u => JsonValue.Object(Map("url" -> JsonValue.Str(u))))))
 
   private def buildInfo(info: Info): JsonValue = {
     JsonValue.Object(
@@ -50,12 +57,16 @@ object OpenApiSpec {
   private def buildOperation(op: OperationSchema, components: ComponentRegistry): JsonValue = {
     val fields = scala.collection.mutable.Map[String, JsonValue]()
 
+    op.summary.foreach(s => fields("summary") = JsonValue.Str(s))
+    op.description.foreach(d => fields("description") = JsonValue.Str(d))
+    if op.tags.nonEmpty then fields("tags") = JsonValue.Array(op.tags.toList.map(JsonValue.Str(_)))
+
     if op.parameters.nonEmpty then {
       fields("parameters") = JsonValue.Array(op.parameters.toList.map(buildParameter))
     }
 
     op.requestBody.foreach { schema =>
-      fields("requestBody") = buildRequestBody(schema, components)
+      fields("requestBody") = buildRequestBody(schema, op.requestMediaTypes, components)
     }
 
     fields("responses") = buildResponses(op, components)
@@ -74,18 +85,19 @@ object OpenApiSpec {
     )
   }
 
-  private def buildRequestBody(schema: TypeSchema, components: ComponentRegistry): JsonValue = {
+  private def buildRequestBody(
+    schema: TypeSchema,
+    mediaTypes: Vector[String],
+    components: ComponentRegistry
+  ): JsonValue = {
+    val effectiveMediaTypes = if mediaTypes.isEmpty then Vector("application/json") else mediaTypes
     JsonValue.Object(
       Map(
         "required" -> JsonValue.Bool(true),
         "content" -> JsonValue.Object(
-          Map(
-            "application/json" -> JsonValue.Object(
-              Map(
-                "schema" -> schemaToJson(schema, components)
-              )
-            )
-          )
+          effectiveMediaTypes.map { mt =>
+            mt -> JsonValue.Object(Map("schema" -> schemaToJson(schema, components)))
+          }.toMap
         )
       )
     )
@@ -93,6 +105,11 @@ object OpenApiSpec {
 
   private def buildResponses(op: OperationSchema, components: ComponentRegistry): JsonValue = {
     val statusStr = op.responseStatus.toString
+    val success = buildSuccessResponse(op, components)
+    JsonValue.Object(Map(statusStr -> success) ++ standardErrorResponses())
+  }
+
+  private def buildSuccessResponse(op: OperationSchema, components: ComponentRegistry): JsonValue = {
     val responseObj = op.responseBody match {
       case Some(schema) if !op.isEventStream =>
         JsonValue.Object(
@@ -123,18 +140,100 @@ object OpenApiSpec {
       case _ =>
         JsonValue.Object(Map("description" -> JsonValue.Str("Success")))
     }
-    JsonValue.Object(Map(statusStr -> responseObj))
+
+    buildResponseHeaders(op.responseHeaders) match {
+      case Some(headers) =>
+        responseObj match {
+          case JsonValue.Object(fields) => JsonValue.Object(fields + ("headers" -> headers))
+          case other => other
+        }
+      case None => responseObj
+    }
+  }
+
+  private def buildResponseHeaders(headers: Vector[ResponseHeaderSchema]): Option[JsonValue] =
+    if headers.isEmpty then None
+    else
+      Some(
+        JsonValue.Object(
+          headers.map { h =>
+            val fields = Map("schema" -> schemaToJson(h.schema))
+              ++ h.description.map(d => "description" -> JsonValue.Str(d))
+              ++ (if h.required then Map("required" -> JsonValue.Bool(true)) else Map.empty)
+            h.name -> JsonValue.Object(fields)
+          }.toMap
+        )
+      )
+
+  /** Every Melian operation can fail at the router/transport level with these responses. 400, 404,
+    * 405, and 500 come from the router itself; 422 is the RFC 9457 validation error rendered from
+    * the Girdle pipeline. 400/422 carry the problem+json schema; the others are empty.
+    */
+  private def standardErrorResponses(): Map[String, JsonValue] = {
+    val problemJson = JsonValue.Object(
+      Map(
+        "schema" -> JsonValue.Object(Map("$ref" -> JsonValue.Str("#/components/schemas/ProblemDetails")))
+      )
+    )
+    Map(
+      "400" -> JsonValue.Object(
+        Map(
+          "description" -> JsonValue.Str("Bad Request"),
+          "content" -> JsonValue.Object(Map("application/problem+json" -> problemJson))
+        )
+      ),
+      "404" -> JsonValue.Object(Map("description" -> JsonValue.Str("Not Found"))),
+      "405" -> JsonValue.Object(Map("description" -> JsonValue.Str("Method Not Allowed"))),
+      "422" -> JsonValue.Object(
+        Map(
+          "description" -> JsonValue.Str("Unprocessable Content"),
+          "content" -> JsonValue.Object(Map("application/problem+json" -> problemJson))
+        )
+      ),
+      "500" -> JsonValue.Object(Map("description" -> JsonValue.Str("Internal Server Error")))
+    )
   }
 
   private def buildComponents(components: ComponentRegistry): JsonValue = {
     JsonValue.Object(
       Map(
-        "schemas" -> JsonValue.Object(components.schemas.map { case (name, schema) =>
-          name -> schemaToJson(schema)
-        })
+        "schemas" -> JsonValue.Object(
+          components.schemas.map { case (name, schema) =>
+            name -> schemaToJson(schema)
+          } + ("ProblemDetails" -> problemDetailsSchema)
+        )
       )
     )
   }
+
+  /** RFC 9457 problem-details shape as emitted by [[net.ghoula.melian.router.ProblemDetails]]. The
+    * `errors` array carries Melian's structured per-field/per-source detail.
+    */
+  private def problemDetailsSchema: JsonValue =
+    JsonValue.Object(
+      Map(
+        "type" -> JsonValue.Str("object"),
+        "properties" -> JsonValue.Object(
+          Map(
+            "type" -> JsonValue.Object(
+              Map("type" -> JsonValue.Str("string"), "format" -> JsonValue.Str("uri-reference"))
+            ),
+            "title" -> JsonValue.Object(Map("type" -> JsonValue.Str("string"))),
+            "status" -> JsonValue.Object(Map("type" -> JsonValue.Str("integer"))),
+            "detail" -> JsonValue.Object(Map("type" -> JsonValue.Str("string"))),
+            "instance" -> JsonValue.Object(
+              Map("type" -> JsonValue.Str("string"), "format" -> JsonValue.Str("uri-reference"))
+            ),
+            "errors" -> JsonValue.Object(
+              Map(
+                "type" -> JsonValue.Str("array"),
+                "items" -> JsonValue.Object(Map("type" -> JsonValue.Str("object")))
+              )
+            )
+          )
+        )
+      )
+    )
 
   private[openapi] def schemaToJson(
     schema: TypeSchema,
@@ -180,7 +279,7 @@ object OpenApiSpec {
   }
 
   /** Makes a rendered schema admit JSON `null`, matching how sarati actually serializes a `None`
-    * field (key present, value `null`) — so the spec describes the real wire shape.
+    * field (key present, value `null`), so the spec describes the real wire shape.
     *
     * Uses the idiomatic JSON Schema 2020-12 `type` array (`["string", "null"]`) for plain typed
     * schemas, preserving siblings like `format`/`items`/`properties`. Falls back to

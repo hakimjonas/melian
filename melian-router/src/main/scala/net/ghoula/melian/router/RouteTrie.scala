@@ -25,26 +25,49 @@ object RouteTrie {
         for {
           node <- acc
           parsed <- PathTemplate.parse(entry.pathTemplate)
-        } yield insertRoute(node, parsed.segments, entry)
+          updated <- insertRoute(node, parsed.segments, entry)
+        } yield updated
       }
-      .map(root => new RouteTrie(root))
+      .map(root => new RouteTrie(addHeadRoutes(root)))
   }
 
-  private def insertRoute(node: Node, segments: List[PathTemplate.Segment], entry: RouteEntry): Node = {
+  /** RFC 9110 Section 9.3.2: a HEAD route is auto-derived from its GET route: identical headers and
+    * status, but no body. Runs once at build time; the derived entry shares the GET handler. Body
+    * stripping happens at dispatch time in [[Router]], so it covers explicit HEAD routes too.
+    */
+  private def addHeadRoutes(node: Node): Node = {
+    val handlers =
+      if node.handlers.contains(Method.GET) && !node.handlers.contains(Method.HEAD) then
+        node.handlers.updated(Method.HEAD, headEntry(node.handlers(Method.GET)))
+      else node.handlers
+    node.copy(
+      handlers = handlers,
+      literals = node.literals.map { case (k, v) => k -> addHeadRoutes(v) },
+      param = node.param.map { case (k, v) => k -> addHeadRoutes(v) }
+    )
+  }
+
+  private def headEntry(get: RouteEntry): RouteEntry =
+    get.copy(method = Method.HEAD, schema = get.schema.copy(method = "HEAD"))
+
+  private def insertRoute(node: Node, segments: List[PathTemplate.Segment], entry: RouteEntry): Either[String, Node] = {
     segments match {
       case Nil =>
-        val updated = node.handlers.updated(entry.method, entry)
-        node.copy(handlers = updated)
+        if node.handlers.contains(entry.method) then
+          Left(s"Duplicate route: ${entry.method.value} ${entry.pathTemplate}")
+        else Right(node.copy(handlers = node.handlers.updated(entry.method, entry)))
 
       case PathTemplate.Segment.Literal(value) :: rest =>
         val child = node.literals.getOrElse(value, emptyNode)
-        val updatedChild = insertRoute(child, rest, entry)
-        node.copy(literals = node.literals.updated(value, updatedChild))
+        insertRoute(child, rest, entry).map { updatedChild =>
+          node.copy(literals = node.literals.updated(value, updatedChild))
+        }
 
       case PathTemplate.Segment.Param(name) :: rest =>
         val (_, child) = node.param.getOrElse((name, emptyNode))
-        val updatedChild = insertRoute(child, rest, entry)
-        node.copy(param = Some((name, updatedChild)))
+        insertRoute(child, rest, entry).map { updatedChild =>
+          node.copy(param = Some((name, updatedChild)))
+        }
     }
   }
 }

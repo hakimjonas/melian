@@ -1,6 +1,6 @@
 package net.ghoula.melian
 
-import net.ghoula.eru.http.{StatusCode, Uri}
+import net.ghoula.eru.http.Uri
 
 /** Response type wrappers encoding HTTP status semantics.
   *
@@ -15,39 +15,3 @@ case object NoContent
 final case class SeeOther(location: Uri)
 case object NotModified
 final case class EventStream[A](source: A)
-
-/** Maps a response wrapper to its HTTP status code. */
-trait ResponseStatus[R] {
-  def statusCode: StatusCode
-}
-
-object ResponseStatus {
-
-  given [A]: ResponseStatus[Ok[A]] with {
-    def statusCode: StatusCode = StatusCode.Ok
-  }
-
-  given [A]: ResponseStatus[Created[A]] with {
-    def statusCode: StatusCode = StatusCode.Created
-  }
-
-  given [A]: ResponseStatus[Accepted[A]] with {
-    def statusCode: StatusCode = StatusCode.Accepted
-  }
-
-  given ResponseStatus[NoContent.type] with {
-    def statusCode: StatusCode = StatusCode.NoContent
-  }
-
-  given ResponseStatus[SeeOther] with {
-    def statusCode: StatusCode = StatusCode.SeeOther
-  }
-
-  given ResponseStatus[NotModified.type] with {
-    def statusCode: StatusCode = StatusCode.NotModified
-  }
-
-  given [A]: ResponseStatus[EventStream[A]] with {
-    def statusCode: StatusCode = StatusCode.Ok
-  }
-}

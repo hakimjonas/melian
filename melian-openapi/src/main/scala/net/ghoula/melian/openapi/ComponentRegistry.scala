@@ -5,7 +5,7 @@ import net.ghoula.melian.schema.*
 /** Deduplicates ObjectSchema types from route metadata into a components registry.
   *
   * Walks all OperationSchema instances, collects named object schemas, and deduplicates by name.
-  * This is the only runtime work — the type information was fully resolved at compile time.
+  * This is the only runtime work; the type information was fully resolved at compile time.
   */
 final case class ComponentRegistry(schemas: Map[String, TypeSchema.ObjectSchema])
 

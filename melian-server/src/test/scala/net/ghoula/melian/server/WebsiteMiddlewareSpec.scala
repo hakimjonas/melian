@@ -103,6 +103,36 @@ class WebsiteMiddlewareSpec extends FunSuite {
     assertEquals(bodyText(unmatched), "fallback")
   }
 
+  test("static file response carries an ETag header") {
+    val handler = StaticFiles.middleware(StaticFiles.Config(tempDir))(fallback)
+    val response = handler(get("/style.css")).unsafeRunSync()
+
+    assert(response.headers.getFirst("ETag").nonEmpty, "Expected an ETag header")
+  }
+
+  test("If-None-Match with the matching ETag returns 304") {
+    val handler = StaticFiles.middleware(StaticFiles.Config(tempDir))(fallback)
+    val first = handler(get("/style.css")).unsafeRunSync()
+    val etag = first.headers.getFirst("ETag").map(_.value).getOrElse(fail("missing ETag"))
+
+    val conditional = Request(Method.GET, Uri.http("localhost", path = "/style.css"), Headers.empty, Body.empty)
+      .addHeader("If-None-Match", etag)
+      .unsafeRunSync()
+    val response = handler(conditional).unsafeRunSync()
+
+    assertEquals(response.status, StatusCode.NotModified)
+  }
+
+  test("If-None-Match with a non-matching ETag returns 200") {
+    val handler = StaticFiles.middleware(StaticFiles.Config(tempDir))(fallback)
+    val conditional = Request(Method.GET, Uri.http("localhost", path = "/style.css"), Headers.empty, Body.empty)
+      .addHeader("If-None-Match", "\"does-not-match\"")
+      .unsafeRunSync()
+    val response = handler(conditional).unsafeRunSync()
+
+    assertEquals(response.status, StatusCode.Ok)
+  }
+
   // --- SecurityHeaders ---
 
   test("adds all security headers") {

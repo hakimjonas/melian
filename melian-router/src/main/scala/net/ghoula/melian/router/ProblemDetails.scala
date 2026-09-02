@@ -31,8 +31,8 @@ object ProblemDetails {
         (StatusCode.BadRequest, simple("Bad Request", "Request body is required"))
       case RequestError.UnsupportedMediaType(expected, actual) =>
         val detail = actual match {
-          case Some(mt) => s"Expected $expected, got $mt"
-          case None => s"Expected $expected, Content-Type header missing"
+          case Some(mt) => s"Expected one of ${expected.mkString(", ")}, got $mt"
+          case None => s"Expected one of ${expected.mkString(", ")}, Content-Type header missing"
         }
         (StatusCode.UnsupportedMediaType, simple("Unsupported Media Type", detail))
     }

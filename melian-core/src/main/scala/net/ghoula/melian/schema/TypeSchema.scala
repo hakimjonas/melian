@@ -5,7 +5,7 @@ import scala.language.strictEquality
 /** Compile-time type descriptors for OpenAPI schema generation.
   *
   * The macro produces these from TypeRepr/Mirror at compile time. The runtime only deduplicates
-  * into a components registry and serializes to JSON — zero reflection.
+  * into a components registry and serializes to JSON, with zero reflection.
   */
 enum TypeSchema derives CanEqual {
   case StringSchema

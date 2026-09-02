@@ -12,20 +12,68 @@ final class RouterBuilder private[router] (
   private[router] def addEntry(entry: RouteEntry): RouterBuilder =
     new RouterBuilder(entries :+ entry)
 
-  inline def get[H](path: String, handler: H): RouterBuilder =
-    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "GET" }) }
+  inline def get[H](
+    path: String,
+    handler: H,
+    summary: String = "",
+    description: String = "",
+    tags: String = ""
+  ): RouterBuilder =
+    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "GET" }, 'summary, 'description, 'tags) }
 
-  inline def post[H](path: String, handler: H): RouterBuilder =
-    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "POST" }) }
+  inline def head[H](
+    path: String,
+    handler: H,
+    summary: String = "",
+    description: String = "",
+    tags: String = ""
+  ): RouterBuilder =
+    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "HEAD" }, 'summary, 'description, 'tags) }
 
-  inline def put[H](path: String, handler: H): RouterBuilder =
-    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "PUT" }) }
+  inline def post[H](
+    path: String,
+    handler: H,
+    summary: String = "",
+    description: String = "",
+    tags: String = ""
+  ): RouterBuilder =
+    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "POST" }, 'summary, 'description, 'tags) }
 
-  inline def delete[H](path: String, handler: H): RouterBuilder =
-    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "DELETE" }) }
+  inline def put[H](
+    path: String,
+    handler: H,
+    summary: String = "",
+    description: String = "",
+    tags: String = ""
+  ): RouterBuilder =
+    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "PUT" }, 'summary, 'description, 'tags) }
 
-  inline def patch[H](path: String, handler: H): RouterBuilder =
-    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "PATCH" }) }
+  inline def delete[H](
+    path: String,
+    handler: H,
+    summary: String = "",
+    description: String = "",
+    tags: String = ""
+  ): RouterBuilder =
+    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "DELETE" }, 'summary, 'description, 'tags) }
+
+  inline def patch[H](
+    path: String,
+    handler: H,
+    summary: String = "",
+    description: String = "",
+    tags: String = ""
+  ): RouterBuilder =
+    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "PATCH" }, 'summary, 'description, 'tags) }
+
+  inline def query[H](
+    path: String,
+    handler: H,
+    summary: String = "",
+    description: String = "",
+    tags: String = ""
+  ): RouterBuilder =
+    ${ RouteMacros.addRoute[H]('this, 'path, 'handler, '{ "QUERY" }, 'summary, 'description, 'tags) }
 
   def build(using
     sanitizer: net.ghoula.melian.ErrorSanitizer = net.ghoula.melian.ErrorSanitizer.development

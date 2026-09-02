@@ -34,6 +34,27 @@ final class Router private[router] (
             case e: HttpError => e
             case e => HttpError.ProtocolError(e.toString, "unexpected")
           }
+          .flatMap { response =>
+            if request.method.value == Method.HEAD.value then stripBody(response)
+            else Eru.succeed(response)
+          }
+    }
+  }
+
+  /** RFC 9110 Section 9.3.2: a HEAD response carries the GET response's status and headers (in
+    * particular its Content-Length) but no body.
+    */
+  private def stripBody(response: Response[Body]): Eru[HttpError, Response[Body]] = {
+    val contentLength = response.body.contentLength
+    val stripped = response.withBody(Body.Empty)
+    contentLength match {
+      case Some(len) =>
+        stripped
+          .setHeader(HeaderNames.ContentLength, len.toString)
+          .mapError { e =>
+            HttpError.InvalidResponse(InvalidResponse(e.toString, "Content-Length header"))
+          }
+      case None => Eru.succeed(stripped)
     }
   }
 

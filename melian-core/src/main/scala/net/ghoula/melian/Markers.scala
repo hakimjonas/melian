@@ -4,7 +4,7 @@ package net.ghoula.melian
   *
   * Transparent type aliases that instruct the compile-time macro where to source each parameter. At
   * compile time the macro inspects TypeRepr to find these markers and determine extraction
-  * strategy. At runtime they are identity — Path[UUID] IS UUID, no wrapping or unwrapping.
+  * strategy. At runtime they are identity: Path[UUID] IS UUID, no wrapping or unwrapping.
   *
   * This eliminates asInstanceOf at the handler call boundary: the macro extracts a UUID, and the
   * handler receives a UUID directly (since Path[UUID] = UUID).

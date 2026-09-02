@@ -1,6 +1,5 @@
 package net.ghoula.melian
 
-import java.net.InetAddress
 import java.util.UUID
 
 import net.ghoula.eru.http.{Body, Headers, Request}
@@ -13,7 +12,6 @@ trait RequestContext {
   def requestId: UUID
   def rawRequest: Request[Body]
   def rawHeaders: Headers
-  def remoteAddress: InetAddress
   def startTime: Long
   def warnings: List[String]
 }

@@ -1,21 +1,26 @@
 package net.ghoula.melian.server
 
 import java.nio.file.{Files, Path}
+import java.security.MessageDigest
+import java.time.Instant
+import java.util.HexFormat
 
 import net.ghoula.eru.Eru
 import net.ghoula.eru.http.*
 
 /** Middleware that serves static files from a directory on disk.
   *
-  * Handles media type detection, path traversal protection, and cache control. Passes through to
-  * the inner handler when no file matches.
+  * Handles media type detection, path traversal protection, cache control, ETag, and conditional
+  * requests (`If-None-Match`, `If-Modified-Since`). Passes through to the inner handler when no
+  * file matches.
   */
 object StaticFiles {
 
   final case class Config(
     baseDir: Path,
     prefix: String = "/",
-    cacheControl: String = "public, max-age=31536000, immutable"
+    cacheControl: String = "public, max-age=31536000, immutable",
+    etag: Boolean = true
   )
 
   private val mediaTypes: Map[String, MediaType] = Map(
@@ -73,7 +78,7 @@ object StaticFiles {
           val file = config.baseDir.resolve(rel).normalize()
           if !file.startsWith(config.baseDir) then Eru.succeed(Response.badRequest(Body.text("Bad Request")))
           else {
-            serveFile(file, config.cacheControl).flatMap {
+            serveFile(file, config.cacheControl, config.etag, request).flatMap {
               case Some(response) => Eru.succeed(response)
               case None => inner(request)
             }
@@ -82,28 +87,75 @@ object StaticFiles {
     }
   }
 
-  private def serveFile(file: Path, cacheControl: String): Eru[HttpError, Option[Response[Body]]] = {
+  private def serveFile(
+    file: Path,
+    cacheControl: String,
+    useEtag: Boolean,
+    request: Request[Body]
+  ): Eru[HttpError, Option[Response[Body]]] = {
     Eru.interruptibleBlocking {
       if !Files.exists(file) || Files.isDirectory(file) then None
       else {
         val mediaType = mediaTypeFor(file.toString)
         val bytes = Files.readAllBytes(file)
-        Some((mediaType, bytes))
+        val lastModified = Files.getLastModifiedTime(file).toInstant
+        Some((mediaType, bytes, lastModified))
       }
     }.mapError(e => HttpError.NetworkError(s"Failed to read file: $file", Some(e))).flatMap {
       case None => Eru.succeed(None)
-      case Some((mediaType, bytes)) =>
-        val body =
-          if mediaType.mainType == "text" || mediaType.subType == "json" || mediaType.subType == "xml" || mediaType.subType == "svg+xml"
-          then Body.text(String(bytes, "UTF-8"), mediaType)
-          else Body.binary(Bytes.fromArray(bytes), mediaType)
-        val response = Response.ok(body)
-        response
-          .setHeader(HeaderNames.ContentType, mediaType.value)
-          .flatMap(_.setHeader(HeaderNames.ContentLength, bytes.length.toString))
-          .flatMap(_.setHeader(HeaderNames.CacheControl, cacheControl))
-          .mapError(e => HttpError.NetworkError(s"Header error: $e"))
-          .map(Some(_))
+      case Some((mediaType, bytes, lastModified)) =>
+        val etag = Option.when(useEtag)(ETag.strong(etagFor(bytes)))
+        val notModified =
+          etag.exists(matchesIfNoneMatch(request, _)) || matchesIfModifiedSince(request, lastModified)
+
+        if notModified then Eru.succeed(Some(Response(StatusCode.NotModified, Headers.empty, Body.Empty)))
+        else {
+          val body =
+            if mediaType.mainType == "text" || mediaType.subType == "json" || mediaType.subType == "xml" || mediaType.subType == "svg+xml"
+            then Body.text(String(bytes, "UTF-8"), mediaType)
+            else Body.binary(Bytes.fromArray(bytes), mediaType)
+
+          val withHeaders = for {
+            r0 <- Eru.succeed(Response.ok(body))
+            r1 <- r0.setHeader(HeaderNames.ContentType, mediaType.value)
+            r2 <- r1.setHeader(HeaderNames.ContentLength, bytes.length.toString)
+            r3 <- r2.setHeader(HeaderNames.CacheControl, cacheControl)
+            r4 <- r3.setHeader(HeaderNames.LastModified, HttpDate.format(lastModified))
+            r5 <- etag match {
+              case Some(t) => r4.setHeader(HeaderNames.ETag, t.headerValue)
+              case None => Eru.succeed(r4)
+            }
+          } yield r5
+
+          withHeaders
+            .mapError(e => HttpError.NetworkError(s"Header error: $e"))
+            .map(Some(_))
+        }
     }
   }
+
+  private def etagFor(bytes: Array[Byte]): String = {
+    val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+    HexFormat.of().formatHex(digest.take(16))
+  }
+
+  private def matchesIfNoneMatch(request: Request[Body], etag: ETag): Boolean =
+    request.headers.getFirst(HeaderNames.IfNoneMatch) match {
+      case Some(h) =>
+        ETag.parseMultiple(h.value).attempt.unsafeRunSync() match {
+          case net.ghoula.eru.Result.Success(tags) => etag.matchesAny(tags, strongComparison = true)
+          case net.ghoula.eru.Result.Failure(_) => false
+        }
+      case None => false
+    }
+
+  private def matchesIfModifiedSince(request: Request[Body], lastModified: Instant): Boolean =
+    request.headers.getFirst(HeaderNames.IfModifiedSince) match {
+      case Some(h) =>
+        HttpDate.parse(h.value).attempt.unsafeRunSync() match {
+          case net.ghoula.eru.Result.Success(ifModifiedSince) => !lastModified.isAfter(ifModifiedSince)
+          case net.ghoula.eru.Result.Failure(_) => false
+        }
+      case None => false
+    }
 }

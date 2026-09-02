@@ -130,7 +130,9 @@ object HandlerIntrospection {
           case AppliedType(wrapper, List(body)) =>
             ResponseInfo(errorType, wrapper.typeSymbol.name, Some(body), Some(body.show), isEndpoint)
           case terminal =>
-            ResponseInfo(errorType, terminal.typeSymbol.name, None, None, isEndpoint)
+            // A case object (NoContent, NotModified) surfaces as its module class, whose name
+            // carries a trailing `$`; strip it so the wrapper name is stable.
+            ResponseInfo(errorType, terminal.typeSymbol.name.stripSuffix("$"), None, None, isEndpoint)
         }
       case other =>
         ResponseInfo(TypeRepr.of[Nothing], other.show, None, None, isEndpoint)

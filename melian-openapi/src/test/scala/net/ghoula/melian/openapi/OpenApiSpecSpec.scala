@@ -94,7 +94,7 @@ class OpenApiSpecSpec extends FunSuite {
     val output = json(spec)
 
     // OpenAPI 3.1 requires `title` and `version` on the Info object. Assert the
-    // exact key — not just the value — so a mislabelled field cannot pass.
+    // exact key, so a mislabelled field cannot pass.
     assert(output.contains("\"title\":\"Test API\""), s"Missing info.title: $output")
     assert(output.contains("\"version\":\"1.0.0\""), s"Missing info.version: $output")
     assert(output.contains("\"description\":\"A test\""), s"Missing info.description: $output")
@@ -163,7 +163,7 @@ class OpenApiSpecSpec extends FunSuite {
   }
 
   test("optional field is excluded from the required list") {
-    // The getRoute User schema has an optional `email` — it must not appear in
+    // The getRoute User schema has an optional `email`; it must not appear in
     // `required`, while `id` and `name` must.
     val spec = OpenApiSpec.generate(info, Vector(getRoute))
     val output = json(spec)
@@ -305,6 +305,114 @@ class OpenApiSpecSpec extends FunSuite {
     assert(output.contains("\"example\":\"My Widget\""), s"Missing field example: $output")
     assert(output.contains("\"description\":\"Item count\""), s"Missing count description: $output")
     assert(output.contains("\"description\":\"A model with annotations\""), s"Missing type description: $output")
+  }
+
+  test("response headers are documented") {
+    val op = OperationSchema(
+      pathTemplate = "/users",
+      method = "POST",
+      parameters = Vector.empty,
+      requestBody = Some(
+        TypeSchema.ObjectSchema("CreateUser", Vector(FieldSchema("name", TypeSchema.StringSchema, required = true)))
+      ),
+      requestMediaTypes = Vector("application/json"),
+      responseStatus = 201,
+      responseBody = Some(
+        TypeSchema.ObjectSchema("User", Vector(FieldSchema("id", TypeSchema.UuidSchema, required = true)))
+      ),
+      responseHeaders = Vector(ResponseHeaderSchema("Location", Some("URI of the created resource"), required = true)),
+      isEventStream = false
+    )
+    val spec = OpenApiSpec.generate(info, Vector(op))
+    val output = json(spec)
+
+    assert(output.contains("\"headers\""), s"Missing response headers: $output")
+    assert(output.contains("\"Location\""), s"Missing Location header: $output")
+    assert(output.contains("\"required\":true"), s"Location should be required: $output")
+  }
+
+  test("error responses are documented for every operation") {
+    val spec = OpenApiSpec.generate(info, Vector(getRoute))
+    val output = json(spec)
+
+    assert(output.contains("\"400\""), s"Missing 400: $output")
+    assert(output.contains("\"404\""), s"Missing 404: $output")
+    assert(output.contains("\"405\""), s"Missing 405: $output")
+    assert(output.contains("\"422\""), s"Missing 422: $output")
+    assert(output.contains("\"500\""), s"Missing 500: $output")
+    assert(output.contains("application/problem+json"), s"Missing problem+json: $output")
+    assert(output.contains("ProblemDetails"), s"Missing ProblemDetails component: $output")
+  }
+
+  test("request body renders multiple media types for Coded bodies") {
+    val op = OperationSchema(
+      pathTemplate = "/upload",
+      method = "POST",
+      parameters = Vector.empty,
+      requestBody = Some(
+        TypeSchema.ObjectSchema("Doc", Vector(FieldSchema("name", TypeSchema.StringSchema, required = true)))
+      ),
+      requestMediaTypes = Vector("application/json", "application/xml", "application/yaml"),
+      responseStatus = 200,
+      responseBody = None,
+      isEventStream = false
+    )
+    val spec = OpenApiSpec.generate(info, Vector(op))
+    val output = json(spec)
+
+    assert(output.contains("application/json"), s"Missing json: $output")
+    assert(output.contains("application/xml"), s"Missing xml: $output")
+    assert(output.contains("application/yaml"), s"Missing yaml: $output")
+  }
+
+  test("Form request body renders form-urlencoded content type") {
+    val op = OperationSchema(
+      pathTemplate = "/login",
+      method = "POST",
+      parameters = Vector.empty,
+      requestBody = Some(
+        TypeSchema.ObjectSchema("LoginForm", Vector(FieldSchema("username", TypeSchema.StringSchema, required = true)))
+      ),
+      requestMediaTypes = Vector("application/x-www-form-urlencoded"),
+      responseStatus = 200,
+      responseBody = None,
+      isEventStream = false
+    )
+    val spec = OpenApiSpec.generate(info, Vector(op))
+    val output = json(spec)
+
+    assert(output.contains("application/x-www-form-urlencoded"), s"Missing form-urlencoded: $output")
+  }
+
+  test("servers are rendered at the top level") {
+    val spec = OpenApiSpec.generate(info.copy(servers = List("https://api.example.com")), Vector(getRoute))
+    val output = json(spec)
+
+    assert(output.contains("\"servers\""), s"Missing servers: $output")
+    assert(output.contains("https://api.example.com"), s"Missing server URL: $output")
+  }
+
+  test("operation summary, description, and tags are rendered") {
+    val op = OperationSchema(
+      pathTemplate = "/users",
+      method = "GET",
+      parameters = Vector.empty,
+      requestBody = None,
+      responseStatus = 200,
+      responseBody = None,
+      isEventStream = false,
+      summary = Some("List users"),
+      description = Some("Returns all users"),
+      tags = Vector("users", "admin")
+    )
+    val spec = OpenApiSpec.generate(info, Vector(op))
+    val output = json(spec)
+
+    assert(output.contains("\"summary\":\"List users\""), s"Missing summary: $output")
+    assert(output.contains("\"description\":\"Returns all users\""), s"Missing description: $output")
+    assert(output.contains("\"tags\""), s"Missing tags: $output")
+    assert(output.contains("\"users\""), s"Missing tag users: $output")
+    assert(output.contains("\"admin\""), s"Missing tag admin: $output")
   }
 
   // --- OpenApiRoutes ---

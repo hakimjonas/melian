@@ -1,6 +1,5 @@
 package net.ghoula.melian.router
 
-import java.net.InetAddress
 import java.util.UUID
 
 import net.ghoula.eru.http.{Body, Headers, Request}
@@ -10,7 +9,6 @@ import net.ghoula.melian.RequestContext
 final case class LiveRequestContext(
   requestId: UUID,
   rawRequest: Request[Body],
-  remoteAddress: InetAddress,
   startTime: Long,
   warnings: List[String]
 ) extends RequestContext {
@@ -22,7 +20,6 @@ object LiveRequestContext {
     LiveRequestContext(
       requestId = UUID.randomUUID(),
       rawRequest = request,
-      remoteAddress = InetAddress.getLoopbackAddress,
       startTime = System.nanoTime(),
       warnings = warnings
     )

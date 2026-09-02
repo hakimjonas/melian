@@ -7,6 +7,7 @@ import java.util.UUID
 import net.ghoula.eru.Eru
 import net.ghoula.eru.http.*
 import net.ghoula.melian.*
+import net.ghoula.melian.extraction.FormDecoder
 import net.ghoula.melian.extraction.FromHeader.BearerToken
 import net.ghoula.sarati.ast.json.JsonValue
 import net.ghoula.sarati.codec.{Decoder, Encoder}
@@ -127,6 +128,30 @@ class RouterBuilderSpec extends FunSuite {
     assertEquals(response.status, StatusCode.MethodNotAllowed)
   }
 
+  test("duplicate route is rejected at build time") {
+    val handler: Path[String] => Eru[Nothing, Ok[String]] =
+      (id: Path[String]) => Eru.succeed(Ok(id))
+
+    val result = Router.builder
+      .get("/users/:id", handler)
+      .get("/users/:id", handler)
+      .build
+
+    assert(result.isLeft, "A duplicate path and method must be rejected")
+  }
+
+  test("structurally-identical routes with different parameter names are rejected") {
+    val handler: Path[String] => Eru[Nothing, Ok[String]] =
+      (id: Path[String]) => Eru.succeed(Ok(id))
+
+    val result = Router.builder
+      .get("/users/:id", handler)
+      .get("/users/:name", handler)
+      .build
+
+    assert(result.isLeft, "Routes differing only in parameter name must be rejected")
+  }
+
   test("multiple routes dispatch correctly") {
     val getUser: Path[UUID] => Eru[Nothing, Ok[String]] =
       (id: Path[UUID]) => Eru.succeed(Ok(s"get-${id}"))
@@ -225,8 +250,54 @@ class RouterBuilderSpec extends FunSuite {
     assertEquals(response.status, StatusCode.Ok)
     val body = bodyText(response)
     assert(body.contains("550e8400"), s"Missing user ID: $body")
-    // requestId is a UUID — check it's present (36 chars with dashes)
+    // requestId is a UUID; check it's present (36 chars with dashes)
     assert(body.length > 40, s"Body too short to contain requestId: $body")
+  }
+
+  test("Endpoint handler receives decode warnings via RequestContext") {
+    case class Cmd(name: String)
+
+    given Decoder[JsonValue, Cmd] with {
+      def decode(value: JsonValue): net.ghoula.sarati.Result[net.ghoula.sarati.DecodeError, Cmd] =
+        value match {
+          case JsonValue.Object(fields) =>
+            fields.get("name") match {
+              case Some(JsonValue.Str(n)) =>
+                net.ghoula.sarati.Result.Partial(
+                  Cmd(n),
+                  List(net.ghoula.sarati.DecodeError.Custom("unknown field", (line = 1, column = 1, offset = 0))),
+                  0
+                )
+              case _ =>
+                net.ghoula.sarati.Result.Failure(
+                  List(net.ghoula.sarati.DecodeError.MissingField("name", (line = 1, column = 1, offset = 0))),
+                  (line = 1, column = 1, offset = 0)
+                )
+            }
+          case _ =>
+            net.ghoula.sarati.Result.Failure(
+              List(net.ghoula.sarati.DecodeError.TypeMismatch("Object", "other", (line = 1, column = 1, offset = 0))),
+              (line = 1, column = 1, offset = 0)
+            )
+        }
+    }
+
+    given Validator[Cmd] = Validator.derive
+
+    val handler: Json[Cmd] => Endpoint[Nothing, Ok[String]] =
+      (cmd: Json[Cmd]) => {
+        val ctx = summon[RequestContext]
+        Eru.succeed(Ok(s"${cmd.name}:${ctx.warnings.size}"))
+      }
+
+    val router = Router.builder.post("/warn", handler).build.getOrElse(fail("build failed"))
+    val response = run(
+      router.toHandler,
+      requestWith(Method.POST, "/warn", body = Body.text("""{"name":"x"}""", MediaType.applicationJson))
+    )
+
+    assertEquals(response.status, StatusCode.Ok)
+    assert(bodyText(response).contains(":1"), s"Expected one decode warning, got: ${bodyText(response)}")
   }
 
   // --- ErrorRenderer tests ---
@@ -337,6 +408,45 @@ class RouterBuilderSpec extends FunSuite {
     assert(body.contains("Authorization") || body.contains("header"), s"Should mention missing header: $body")
   }
 
+  // --- QUERY (RFC 10008) ---
+
+  test("QUERY with JSON body dispatches") {
+    val handler: Json[CreateCommand] => Eru[Nothing, Ok[String]] =
+      (cmd: Json[CreateCommand]) => Eru.succeed(Ok(s"query-${cmd.name}"))
+
+    val router = Router.builder.query("/search", handler).build.getOrElse(fail("build failed"))
+    val response = run(
+      router.toHandler,
+      requestWith(
+        Method.QUERY,
+        "/search",
+        body = Body.text("""{"name":"needle"}""", MediaType.applicationJson),
+        headerPairs = List("Content-Type" -> "application/json")
+      )
+    )
+
+    assertEquals(response.status, StatusCode.Ok)
+    assert(bodyText(response).contains("query-needle"))
+  }
+
+  test("QUERY to a path with a non-QUERY route returns 405") {
+    val handler: Json[CreateCommand] => Eru[Nothing, Ok[String]] =
+      (cmd: Json[CreateCommand]) => Eru.succeed(Ok(cmd.name))
+
+    val router = Router.builder.post("/search", handler).build.getOrElse(fail("build failed"))
+    val response = run(
+      router.toHandler,
+      requestWith(
+        Method.QUERY,
+        "/search",
+        body = Body.text("""{"name":"x"}""", MediaType.applicationJson),
+        headerPairs = List("Content-Type" -> "application/json")
+      )
+    )
+
+    assertEquals(response.status, StatusCode.MethodNotAllowed)
+  }
+
   // --- Query extraction ---
 
   test("GET with required query param extracts value") {
@@ -394,6 +504,28 @@ class RouterBuilderSpec extends FunSuite {
 
     assertEquals(response.status, StatusCode.Ok)
     assert(bodyText(response).contains("status-none"))
+  }
+
+  test("query parameter preserves a literal plus character") {
+    val handler: Query["q", String] => Eru[Nothing, Ok[String]] =
+      (q: Query["q", String]) => Eru.succeed(Ok(s"q-$q"))
+
+    val router = Router.builder.get("/search", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWithQuery(Method.GET, "/search?q=a+b"))
+
+    assertEquals(response.status, StatusCode.Ok)
+    assert(bodyText(response).contains("q-a+b"), s"Expected literal plus, got: ${bodyText(response)}")
+  }
+
+  test("malformed percent-encoding in a query parameter does not crash") {
+    val handler: Query["q", String] => Eru[Nothing, Ok[String]] =
+      (q: Query["q", String]) => Eru.succeed(Ok(s"q-$q"))
+
+    val router = Router.builder.get("/search", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWithQuery(Method.GET, "/search?q=%ZZ"))
+
+    assertEquals(response.status, StatusCode.Ok)
+    assert(bodyText(response).contains("q-%ZZ"), s"Expected literal fallback, got: ${bodyText(response)}")
   }
 
   test("GET with path param and multiple query params") {
@@ -520,6 +652,296 @@ class RouterBuilderSpec extends FunSuite {
 
     val body = bodyText(response)
     assert(body.contains("2 validation error"), s"Should have 2 errors: $body")
+  }
+
+  // --- Coded body (Content-Type dispatch) ---
+
+  test("Coded body dispatches on Content-Type: JSON, XML, YAML") {
+    import net.ghoula.sarati.codec.JsonDecoders.given
+    import net.ghoula.sarati.codec.XmlDecoders.given
+    import net.ghoula.sarati.codec.YamlDecoders.given
+
+    given Validator[String] with {
+      def validate(a: String): ValidationResult[String] = ValidationResult.Valid(a)
+    }
+
+    val handler: Coded[String] => Eru[Nothing, Ok[String]] =
+      (s: Coded[String]) => Eru.succeed(Ok(s"got:$s"))
+
+    val router = Router.builder.post("/coded", handler).build.getOrElse(fail("build failed"))
+
+    val jsonResp = run(
+      router.toHandler,
+      requestWith(
+        Method.POST,
+        "/coded",
+        body = Body.text("\"hello\"", MediaType.applicationJson),
+        headerPairs = List("Content-Type" -> "application/json")
+      )
+    )
+    assertEquals(jsonResp.status, StatusCode.Ok, s"JSON response: ${jsonResp.status} body=${bodyText(jsonResp)}")
+    assert(bodyText(jsonResp).contains("hello"), s"JSON body: ${bodyText(jsonResp)}")
+
+    val xmlResp = run(
+      router.toHandler,
+      requestWith(
+        Method.POST,
+        "/coded",
+        body = Body.text("<root>world</root>", MediaType.applicationXml),
+        headerPairs = List("Content-Type" -> "application/xml")
+      )
+    )
+    assertEquals(xmlResp.status, StatusCode.Ok)
+    assert(bodyText(xmlResp).contains("world"), s"XML body: ${bodyText(xmlResp)}")
+
+    val yamlResp = run(
+      router.toHandler,
+      requestWith(
+        Method.POST,
+        "/coded",
+        body = Body.text("yamlValue"),
+        headerPairs = List("Content-Type" -> "application/yaml")
+      )
+    )
+    assertEquals(yamlResp.status, StatusCode.Ok)
+    assert(bodyText(yamlResp).contains("yamlValue"), s"YAML body: ${bodyText(yamlResp)}")
+  }
+
+  // --- Form body (urlencoded) ---
+
+  test("Form body decodes urlencoded fields") {
+    case class LoginForm(username: String, password: String)
+
+    given FormDecoder[LoginForm] with {
+      def decode(form: Map[String, String]): Either[Vector[FieldError], LoginForm] =
+        (form.get("username"), form.get("password")) match {
+          case (Some(u), Some(p)) => Right(LoginForm(u, p))
+          case _ => Left(Vector(FieldError("form", "missing username or password", None)))
+        }
+    }
+
+    given Validator[LoginForm] with {
+      def validate(a: LoginForm): ValidationResult[LoginForm] = ValidationResult.Valid(a)
+    }
+
+    val handler: Form[LoginForm] => Eru[Nothing, Ok[String]] =
+      (f: Form[LoginForm]) => Eru.succeed(Ok(s"user:${f.username}"))
+
+    val router = Router.builder.post("/login", handler).build.getOrElse(fail("build failed"))
+    val response = run(
+      router.toHandler,
+      requestWith(
+        Method.POST,
+        "/login",
+        body = Body.text("username=alice&password=secret"),
+        headerPairs = List("Content-Type" -> "application/x-www-form-urlencoded")
+      )
+    )
+
+    assertEquals(response.status, StatusCode.Ok)
+    assert(bodyText(response).contains("user:alice"), s"Form body: ${bodyText(response)}")
+  }
+
+  test("Coded body with derived CodedDecoder decodes a case class") {
+    import net.ghoula.sarati.codec.JsonDecoders.given
+    import net.ghoula.sarati.codec.XmlDecoders.given
+    import net.ghoula.sarati.codec.YamlDecoders.given
+
+    case class Payload(name: String, count: Int)
+
+    given CodedDecoder[Payload] = CodedDecoder.derived
+    given Validator[Payload] = Validator.derive
+
+    val handler: Coded[Payload] => Eru[Nothing, Ok[String]] =
+      (p: Coded[Payload]) => Eru.succeed(Ok(s"${p.name}:${p.count}"))
+
+    val router = Router.builder.post("/payload", handler).build.getOrElse(fail("build failed"))
+    val response = run(
+      router.toHandler,
+      requestWith(
+        Method.POST,
+        "/payload",
+        body = Body.text("""{"name":"widget","count":3}""", MediaType.applicationJson),
+        headerPairs = List("Content-Type" -> "application/json")
+      )
+    )
+
+    assertEquals(response.status, StatusCode.Ok)
+    assert(bodyText(response).contains("widget:3"), s"Body: ${bodyText(response)}")
+  }
+
+  test("Coded body with unsupported Content-Type returns 415") {
+    import net.ghoula.sarati.codec.JsonDecoders.given
+    import net.ghoula.sarati.codec.XmlDecoders.given
+    import net.ghoula.sarati.codec.YamlDecoders.given
+
+    given Validator[String] with {
+      def validate(a: String): ValidationResult[String] = ValidationResult.Valid(a)
+    }
+
+    val handler: Coded[String] => Eru[Nothing, Ok[String]] =
+      (s: Coded[String]) => Eru.succeed(Ok(s))
+
+    val router = Router.builder.post("/coded", handler).build.getOrElse(fail("build failed"))
+    val response = run(
+      router.toHandler,
+      requestWith(
+        Method.POST,
+        "/coded",
+        body = Body.text("whatever"),
+        headerPairs = List("Content-Type" -> "text/csv")
+      )
+    )
+
+    assertEquals(response.status, StatusCode.UnsupportedMediaType)
+  }
+
+  test("Form body with derived FormDecoder") {
+    case class LoginForm(username: String, count: Int, note: Option[String])
+
+    given FormDecoder[LoginForm] = FormDecoder.derived
+    given Validator[LoginForm] with {
+      def validate(a: LoginForm): ValidationResult[LoginForm] = ValidationResult.Valid(a)
+    }
+
+    val handler: Form[LoginForm] => Eru[Nothing, Ok[String]] =
+      (f: Form[LoginForm]) => Eru.succeed(Ok(s"${f.username}:${f.count}:${f.note.getOrElse("none")}"))
+
+    val router = Router.builder.post("/login2", handler).build.getOrElse(fail("build failed"))
+    val response = run(
+      router.toHandler,
+      requestWith(
+        Method.POST,
+        "/login2",
+        body = Body.text("username=bob&count=7"),
+        headerPairs = List("Content-Type" -> "application/x-www-form-urlencoded")
+      )
+    )
+
+    assertEquals(response.status, StatusCode.Ok)
+    assert(bodyText(response).contains("bob:7:none"), s"Body: ${bodyText(response)}")
+  }
+
+  test("Form body with derived FormDecoder rejects missing required field") {
+    case class LoginForm(username: String, count: Int)
+
+    given FormDecoder[LoginForm] = FormDecoder.derived
+    given Validator[LoginForm] with {
+      def validate(a: LoginForm): ValidationResult[LoginForm] = ValidationResult.Valid(a)
+    }
+
+    val handler: Form[LoginForm] => Eru[Nothing, Ok[String]] =
+      (f: Form[LoginForm]) => Eru.succeed(Ok(f.username))
+
+    val router = Router.builder.post("/login3", handler).build.getOrElse(fail("build failed"))
+    val response = run(
+      router.toHandler,
+      requestWith(
+        Method.POST,
+        "/login3",
+        body = Body.text("username=bob"),
+        headerPairs = List("Content-Type" -> "application/x-www-form-urlencoded")
+      )
+    )
+
+    assertEquals(response.status, StatusCode(422).unsafeRunSync())
+  }
+
+  // --- HEAD auto-generation (RFC 9110 9.3.2) ---
+
+  test("HEAD auto-generated from GET returns status and headers without body") {
+    val handler: Path[UUID] => Eru[Nothing, Ok[Workspace]] =
+      (id: Path[UUID]) => Eru.succeed(Ok(Workspace(id, "name")))
+
+    val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWith(Method.HEAD, "/users/550e8400-e29b-41d4-a716-446655440000"))
+
+    assertEquals(response.status, StatusCode.Ok)
+    assert(response.body.isEmpty, s"HEAD must have an empty body, got: ${response.body}")
+    assert(
+      response.headers.contentTypeRaw.exists(_.contains("json")),
+      "HEAD must preserve the GET response's Content-Type"
+    )
+  }
+
+  test("HEAD preserves the GET response's Content-Length") {
+    val handler: Path[UUID] => Eru[Nothing, Ok[Workspace]] =
+      (id: Path[UUID]) => Eru.succeed(Ok(Workspace(id, "name")))
+
+    val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
+    val path = "/users/550e8400-e29b-41d4-a716-446655440000"
+
+    val getResponse = run(router.toHandler, requestWith(Method.GET, path))
+    val headResponse = run(router.toHandler, requestWith(Method.HEAD, path))
+
+    val headLength = headResponse.headers.getFirst("Content-Length").map(_.value.toLong)
+    assertEquals(headLength, getResponse.body.contentLength, "HEAD must report the GET body length")
+  }
+
+  test("explicit HEAD route serves without body") {
+    val handler: () => Eru[Nothing, Ok[String]] =
+      () => Eru.succeed(Ok("explicit-head"))
+
+    val router = Router.builder.head("/explicit", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWith(Method.HEAD, "/explicit"))
+
+    assertEquals(response.status, StatusCode.Ok)
+    assert(response.body.isEmpty, s"Explicit HEAD must have an empty body, got: ${response.body}")
+  }
+
+  test("405 Allow header advertises HEAD for a GET route") {
+    val handler: Path[UUID] => Eru[Nothing, Ok[String]] =
+      (id: Path[UUID]) => Eru.succeed(Ok(s"user-${id}"))
+
+    val router = Router.builder.get("/users/:id", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWith(Method.POST, "/users/550e8400-e29b-41d4-a716-446655440000"))
+
+    assertEquals(response.status, StatusCode.MethodNotAllowed)
+    val allow = response.headers.getFirst("Allow").map(_.value).getOrElse("")
+    assert(allow.contains("GET"), s"Allow should contain GET: $allow")
+    assert(allow.contains("HEAD"), s"Allow should contain HEAD: $allow")
+  }
+
+  test("route summary, description, and tags flow into the operation schema") {
+    val handler: () => Eru[Nothing, Ok[String]] =
+      () => Eru.succeed(Ok("ok"))
+
+    val builder = Router.builder.get(
+      "/meta",
+      handler,
+      summary = "A summary",
+      description = "A description",
+      tags = "one, two"
+    )
+    val schema = builder.operationSchemas.head
+
+    assertEquals(schema.summary, Some("A summary"))
+    assertEquals(schema.description, Some("A description"))
+    assertEquals(schema.tags, Vector("one", "two"))
+  }
+
+  // --- Redirect / no-body status ---
+
+  test("SeeOther response sets 303 with Location header") {
+    val target = Uri.http("example.org", path = "/elsewhere")
+    val handler: () => Eru[Nothing, SeeOther] =
+      () => Eru.succeed(SeeOther(target))
+
+    val router = Router.builder.get("/redirect", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWith(Method.GET, "/redirect"))
+
+    assertEquals(response.status, StatusCode.SeeOther)
+    assert(response.headers.getFirst("Location").exists(_.value.contains("/elsewhere")), "Missing Location header")
+  }
+
+  test("NotModified response sets 304") {
+    val handler: () => Eru[Nothing, NotModified.type] =
+      () => Eru.succeed(NotModified)
+
+    val router = Router.builder.get("/cached", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWith(Method.GET, "/cached"))
+
+    assertEquals(response.status, StatusCode.NotModified)
   }
 
   // --- EventStream / SSE ---

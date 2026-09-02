@@ -94,7 +94,7 @@ class CompileErrorSpec extends FunSuite {
     assert(errors.contains("Validator"), s"Should mention missing Validator: $errors")
   }
 
-  test("missing BodyDecoder for Json body does not compile") {
+  test("missing Decoder for Json body does not compile") {
     val errors = compileErrors("""
       import net.ghoula.eru.Eru
       import net.ghoula.eru.http.*
@@ -111,6 +111,6 @@ class CompileErrorSpec extends FunSuite {
 
       Router.builder.post("/items", (auth: Header[BearerToken], cmd: Json[Cmd]) => Eru.succeed(Ok("ok")))
     """)
-    assert(errors.contains("BodyDecoder"), s"Should mention missing BodyDecoder: $errors")
+    assert(errors.contains("Decoder[JsonValue"), s"Should mention missing Decoder: $errors")
   }
 }

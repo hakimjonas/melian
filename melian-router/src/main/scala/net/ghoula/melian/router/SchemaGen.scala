@@ -7,7 +7,7 @@ import net.ghoula.melian.schema.*
 /** Compile-time schema generation from TypeRepr.
   *
   * Traverses types via Mirror.ProductOf to produce TypeSchema descriptors. All work happens at
-  * compile time — the output is quoted expressions that construct schema values at runtime.
+  * compile time; the output is quoted expressions that construct schema values at runtime.
   */
 object SchemaGen {
 
@@ -100,7 +100,10 @@ object SchemaGen {
     templateParamNames: List[String],
     responseStatus: Int,
     responseBodyType: q.reflect.TypeRepr,
-    isEventStream: Boolean
+    isEventStream: Boolean,
+    summary: Option[String],
+    description: Option[String],
+    tags: Vector[String]
   ): Expr[OperationSchema] = {
     import q.reflect.*
 
@@ -108,6 +111,15 @@ object SchemaGen {
     val methodExpr = Expr(method)
     val statusExpr = Expr(responseStatus)
     val isEventStreamExpr = Expr(isEventStream)
+    val summaryExpr = summary match {
+      case Some(s) => '{ Some(${ Expr(s) }) }
+      case None => '{ None }
+    }
+    val descriptionExpr = description match {
+      case Some(d) => '{ Some(${ Expr(d) }) }
+      case None => '{ None }
+    }
+    val tagsExpr = '{ Vector(${ Varargs(tags.map(Expr(_))) }*) }
 
     // Path parameters draw their names from templateParamNames in order; pre-zip the path-param
     // positions with their names so the per-param mapping needs no counter.
@@ -152,16 +164,40 @@ object SchemaGen {
 
     val paramsExpr = '{ Vector(${ Varargs(paramExprs) }*) }
 
-    val requestBodyExpr: Expr[Option[TypeSchema]] = paramTypes.zip(info.params).collectFirst {
-      case (tpe, paramInfo) if paramInfo.kind == HandlerIntrospection.ParamKind.JsonBody =>
+    val bodyParam: Option[(q.reflect.TypeRepr, HandlerIntrospection.ParamKind)] =
+      paramTypes.zip(info.params).collectFirst {
+        case (tpe, paramInfo)
+            if paramInfo.kind == HandlerIntrospection.ParamKind.JsonBody
+              || paramInfo.kind == HandlerIntrospection.ParamKind.CodedBody
+              || paramInfo.kind == HandlerIntrospection.ParamKind.FormBody =>
+          (tpe, paramInfo.kind)
+      }
+
+    val requestBodyExpr: Expr[Option[TypeSchema]] = bodyParam match {
+      case Some((tpe, _)) =>
         val innerType = tpe match {
           case AppliedType(_, args) if args.nonEmpty => args.last
           case other => other
         }
-        schemaFor(innerType, Set.empty)
-    } match {
-      case Some(schema) => '{ Some($schema) }
+        val schema = schemaFor(innerType, Set.empty)
+        '{ Some($schema) }
       case None => '{ None }
+    }
+
+    val requestMediaTypesExpr: Expr[Vector[String]] = bodyParam match {
+      case Some((_, HandlerIntrospection.ParamKind.CodedBody)) =>
+        '{ Vector("application/json", "application/xml", "application/yaml") }
+      case Some((_, HandlerIntrospection.ParamKind.FormBody)) =>
+        '{ Vector("application/x-www-form-urlencoded") }
+      case _ => '{ Vector("application/json") }
+    }
+
+    val responseHeadersExpr: Expr[Vector[ResponseHeaderSchema]] = info.response.wrapperName match {
+      case "Created" =>
+        '{ Vector(ResponseHeaderSchema("Location", Some("URI of the created resource"), required = true)) }
+      case "SeeOther" =>
+        '{ Vector(ResponseHeaderSchema("Location", Some("URI to redirect to"), required = true)) }
+      case _ => '{ Vector.empty[ResponseHeaderSchema] }
     }
 
     val responseBodyExpr: Expr[Option[TypeSchema]] =
@@ -181,9 +217,14 @@ object SchemaGen {
         method = $methodExpr,
         parameters = $paramsExpr,
         requestBody = $requestBodyExpr,
+        requestMediaTypes = $requestMediaTypesExpr,
         responseStatus = $statusExpr,
         responseBody = $responseBodyExpr,
-        isEventStream = $isEventStreamExpr
+        responseHeaders = $responseHeadersExpr,
+        isEventStream = $isEventStreamExpr,
+        summary = $summaryExpr,
+        description = $descriptionExpr,
+        tags = $tagsExpr
       )
     }
   }
@@ -207,12 +248,20 @@ object SchemaGen {
     }
   }
 
-  def responseStatusCode(wrapperName: String): Int = wrapperName match {
-    case "Ok" => 200
-    case "Created" => 201
-    case "Accepted" => 202
-    case "NoContent" => 204
-    case "EventStream" => 200
-    case _ => 200
+  def responseStatusCode(using q: Quotes)(wrapperName: String): Int = {
+    import q.reflect.*
+    wrapperName match {
+      case "Ok" => 200
+      case "Created" => 201
+      case "Accepted" => 202
+      case "NoContent" => 204
+      case "SeeOther" => 303
+      case "NotModified" => 304
+      case "EventStream" => 200
+      case other =>
+        report.errorAndAbort(
+          s"Unknown response wrapper type: $other. Handlers must return Ok[A], Created[A], Accepted[A], NoContent, SeeOther, NotModified, or EventStream[A]."
+        )
+    }
   }
 }

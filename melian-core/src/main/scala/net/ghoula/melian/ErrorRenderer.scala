@@ -5,7 +5,8 @@ import net.ghoula.eru.http.{Body, Response}
 
 /** Typeclass for rendering domain errors into HTTP responses.
   *
-  * Three-tier precedence: endpoint-level given > group-level > global. Innermost wins.
+  * Resolved as a single global given. A handler whose error type is `Nothing` cannot fail, so it is
+  * covered by the no-op [[ErrorRenderer.Nothing]] instance.
   */
 trait ErrorRenderer[E] {
   def render(error: E): Eru[Nothing, Response[Body]]
