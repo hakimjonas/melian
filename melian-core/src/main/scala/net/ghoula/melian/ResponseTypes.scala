@@ -16,7 +16,6 @@ final case class Accepted[A](body: A)
 case object NoContent
 final case class SeeOther(location: Uri)
 case object NotModified
-final case class EventStream[A](source: A)
 
 /** 401 Unauthorized. The challenge string becomes the mandatory `WWW-Authenticate` header; the body
   * is encoded like [[Ok]]'s.

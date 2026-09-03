@@ -586,7 +586,12 @@ The generated response code:
 2. Each event is encoded via `Encoder[A, JsonValue]` and wrapped as a `ServerSentEvent.data`
 3. Events are pushed through eru-http's `ChunkStream` using `ServerSentEvent.toChunk`
 
-The `EventStream[A]` type wraps a chunk source (`ChunkStream`). Backpressure is natural -- the Virtual Thread blocks on writes when the client falls behind.
+The `EventStream[A]` type wraps a pull-based `EventSource[A]`: each event is encoded via
+`Encoder[A, JsonValue]` and emitted as a `ServerSentEvent.data`; a source whose element type is
+`ServerSentEvent` passes through verbatim for full control of `event:`/`id:` fields. Backpressure
+is natural -- the Virtual Thread blocks on writes when the client falls behind. A source failure
+terminates the stream mid-flight (status and headers are already on the wire), and there is no
+completion or disconnect hook -- sources backed by producers must be bounded or self-cleaning.
 
 SSE endpoints enable any push-based pattern: live notifications, progress tracking, dashboard updates, streaming computation results, or real-time validation feedback.
 

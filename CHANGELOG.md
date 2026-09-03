@@ -34,6 +34,7 @@ First public release. Five modules: `melian-core`, `melian-router`, `melian-open
 
 ### Changed
 
+- `EventStream[A]` now wraps a pull-based `EventSource[A]` instead of a pre-built `ChunkStream`: typed events are JSON-encoded via `Encoder[A, JsonValue]` and emitted as `ServerSentEvent.data`, while a source of pre-formatted `ServerSentEvent`s passes through verbatim (construct with `EventSource.fromServerSentEvents`, `fromList`, `fromIterator`, or `fromPull`; combinators `map`/`filter`/`collect`/`++` included). A source failure terminates the SSE response mid-flight; there is no completion hook, so producer-backed sources must be bounded or self-cleaning.
 - A handler whose error type has no `ErrorRenderer` given in scope no longer fails compilation outright: the route resolves through the builder-level renderer (if one is active) and then the built-in problem-details 500 fallback. Endpoints that previously relied on the compile error to surface a missing renderer should rely on a given or a builder-level renderer as before.
 - `Status[Code, A]` routes resolve their status code once at route construction instead of on every request.
 - Content-negotiation tie-breaking is RFC 9110 §12.5.2-exact: among entries sharing the best q-value, a more specific media range (`type/subtype`) now beats a less specific one (`type/*`, `*/*`); the server's preference order decides only after specificity. Entries with `q=0` are unacceptable and answer 406 instead of being served.

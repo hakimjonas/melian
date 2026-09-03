@@ -946,15 +946,14 @@ class RouterBuilderSpec extends FunSuite {
 
   // --- EventStream / SSE ---
 
-  test("GET returning EventStream produces SSE response") {
-    val events = List(
-      ServerSentEvent.data("hello"),
-      ServerSentEvent.data("world")
-    )
-    val handler: Path[UUID] => Eru[Nothing, EventStream[ChunkStream]] =
+  test("GET returning raw EventStream produces SSE response") {
+    val handler: Path[UUID] => Eru[Nothing, EventStream[ServerSentEvent]] =
       (_: Path[UUID]) => {
-        val stream = ServerSentEvent.toChunkStream(events)
-        Eru.succeed(EventStream(stream))
+        val events = List(
+          ServerSentEvent.data("hello"),
+          ServerSentEvent.data("world")
+        )
+        Eru.succeed(EventStream(EventSource.fromServerSentEvents(events)))
       }
 
     val router = Router.builder.get("/events/:id", handler).build.getOrElse(fail("build failed"))
@@ -965,13 +964,19 @@ class RouterBuilderSpec extends FunSuite {
     assert(contentType.exists(_.contains("event-stream")), s"Expected text/event-stream, got: $contentType")
   }
 
-  test("EventStream body contains SSE-formatted events") {
-    val events = List(
-      ServerSentEvent.data("event-one"),
-      ServerSentEvent.event("update", "event-two")
-    )
-    val handler: () => Eru[Nothing, EventStream[ChunkStream]] =
-      () => Eru.succeed(EventStream(ServerSentEvent.toChunkStream(events)))
+  test("raw EventStream body contains SSE-formatted events verbatim") {
+    val handler: () => Eru[Nothing, EventStream[ServerSentEvent]] =
+      () =>
+        Eru.succeed(
+          EventStream(
+            EventSource.fromServerSentEvents(
+              List(
+                ServerSentEvent.data("event-one"),
+                ServerSentEvent.event("update", "event-two")
+              )
+            )
+          )
+        )
 
     val router = Router.builder.get("/feed", handler).build.getOrElse(fail("build failed"))
     val response = run(router.toHandler, requestWith(Method.GET, "/feed"))
@@ -985,5 +990,27 @@ class RouterBuilderSpec extends FunSuite {
     assert(bodyContent.contains("data: event-one"), s"Missing first event: $bodyContent")
     assert(bodyContent.contains("data: event-two"), s"Missing second event: $bodyContent")
     assert(bodyContent.contains("event: update"), s"Missing event type: $bodyContent")
+  }
+
+  test("typed EventStream JSON-encodes each event as a data frame") {
+    case class Tick(n: Int)
+
+    import net.ghoula.sarati.codec.JsonEncoders.given
+    given Encoder[Tick, JsonValue] = Encoder.derived
+
+    val handler: () => Eru[Nothing, EventStream[Tick]] =
+      () => Eru.succeed(EventStream(EventSource.fromList(List(Tick(1), Tick(2)))))
+
+    val router = Router.builder.get("/ticks", handler).build.getOrElse(fail("build failed"))
+    val response = run(router.toHandler, requestWith(Method.GET, "/ticks"))
+
+    assertEquals(response.status, StatusCode.Ok)
+    val bodyContent = response.body match {
+      case s: Body.Stream => s.asString().unsafeRunSync()
+      case Body.Text(text, _, _) => text
+      case other => fail(s"Expected streaming body, got: $other"); ""
+    }
+    assert(bodyContent.contains("""data: {"n":1}"""), s"Missing encoded first event: $bodyContent")
+    assert(bodyContent.contains("""data: {"n":2}"""), s"Missing encoded second event: $bodyContent")
   }
 }

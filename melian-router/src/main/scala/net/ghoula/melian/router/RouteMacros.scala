@@ -100,6 +100,22 @@ object RouteMacros {
               )
             )
 
+        // Typed SSE: for an EventStream[A] whose element type is not ServerSentEvent, each event
+        // is JSON-encoded via Encoder[A, JsonValue]. Element type ServerSentEvent is the raw
+        // passthrough mode and needs no encoder.
+        val rawSse = TypeRepr.of[b].dealias =:= TypeRepr.of[net.ghoula.eru.http.ServerSentEvent]
+        val sseEventEncoder: Option[Expr[net.ghoula.sarati.codec.Encoder[b, net.ghoula.sarati.ast.json.JsonValue]]] =
+          if !isEventStream || rawSse then None
+          else
+            Some(
+              summonOrAbort[net.ghoula.sarati.codec.Encoder[b, net.ghoula.sarati.ast.json.JsonValue]](
+                method,
+                pathStr,
+                "response",
+                s"Encoder[${Type.show[b]}, JsonValue] (SSE event payload)"
+              )
+            )
+
         // Negotiation needs the Sarati encoders directly: JSON is the baseline, XML and YAML are
         // opt-in via their encoders' presence.
         val negotiatedMediaTypes: Vector[String] =
@@ -185,6 +201,7 @@ object RouteMacros {
                               builder,
                               summonedErrorRenderer,
                               bodyEncoderExpr,
+                              sseEventEncoder,
                               negotiatorExpr,
                               'hoistedStatus,
                               returnsEndpoint,
@@ -209,6 +226,7 @@ object RouteMacros {
                               builder,
                               summonedErrorRenderer,
                               bodyEncoderExpr,
+                              sseEventEncoder,
                               negotiatorExpr,
                               'hoistedStatus,
                               returnsEndpoint,
@@ -250,6 +268,7 @@ object RouteMacros {
                       builder,
                       summonedErrorRenderer,
                       bodyEncoderExpr,
+                      sseEventEncoder,
                       negotiatorExpr,
                       'hoistedStatus,
                       returnsEndpoint,
@@ -426,6 +445,7 @@ object RouteMacros {
     builder: Expr[RouterBuilder],
     summonedErrorRenderer: Option[Expr[net.ghoula.melian.ErrorRenderer[E]]],
     bodyEncoder: Option[Expr[net.ghoula.eru.http.BodyEncoder[B]]],
+    sseEventEncoder: Option[Expr[net.ghoula.sarati.codec.Encoder[B, net.ghoula.sarati.ast.json.JsonValue]]],
     negotiator: Option[Expr[ResponseNegotiator[B]]],
     hoistedStatus: Expr[Option[net.ghoula.eru.http.StatusCode]],
     returnsEndpoint: Boolean,
@@ -460,7 +480,14 @@ object RouteMacros {
       '{
         $eruExpr.attempt.flatMap {
           case net.ghoula.eru.Result.Success(response) =>
-            encodeEventStream(response, $warnings)
+            ${
+              sseEventEncoder match {
+                case Some(enc) =>
+                  '{ encodeTypedEventStream[R, B](response, $enc, $warnings) }
+                case None =>
+                  '{ encodeRawEventStream[R](response, $warnings) }
+              }
+            }
           case net.ghoula.eru.Result.Failure(domainError) =>
             ${ renderError[E]('domainError, builder, summonedErrorRenderer) }
         }
@@ -1051,15 +1078,35 @@ object RouteMacros {
 
   // --- Response encoding ---
 
-  private def encodeEventStream[R](
+  /** Raw SSE: the stream's element type is `ServerSentEvent`, so events pass through verbatim. */
+  private def encodeRawEventStream[R](
     response: R,
     warnings: List[String]
   ): net.ghoula.eru.Eru[ErrType, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
     import net.ghoula.eru.Eru
     import net.ghoula.eru.http.*
     val sse: Eru[ErrType, Response[Body]] = (response: Any) match {
-      case es: net.ghoula.melian.EventStream[ChunkStream @unchecked] =>
-        Response.sse(es.source).mapError { err =>
+      case es: net.ghoula.melian.EventStream[ServerSentEvent @unchecked] =>
+        Response.sse(SseBridge.raw(es.source)).mapError { err =>
+          HttpError.InvalidResponse(InvalidResponse(err.toString, "SSE headers")): ErrType
+        }
+      case other =>
+        Eru.fail(HttpError.ProtocolError(s"Expected EventStream, got: ${other.getClass.getName}", "response"): ErrType)
+    }
+    sse.flatMap(attachWarnings(_, warnings))
+  }
+
+  /** Typed SSE: each event is JSON-encoded and emitted as a `ServerSentEvent.data`. */
+  private def encodeTypedEventStream[R, B](
+    response: R,
+    eventEncoder: net.ghoula.sarati.codec.Encoder[B, net.ghoula.sarati.ast.json.JsonValue],
+    warnings: List[String]
+  ): net.ghoula.eru.Eru[ErrType, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
+    import net.ghoula.eru.Eru
+    import net.ghoula.eru.http.*
+    val sse: Eru[ErrType, Response[Body]] = (response: Any) match {
+      case es: net.ghoula.melian.EventStream[B @unchecked] =>
+        Response.sse(SseBridge.typed(es.source, eventEncoder)).mapError { err =>
           HttpError.InvalidResponse(InvalidResponse(err.toString, "SSE headers")): ErrType
         }
       case other =>

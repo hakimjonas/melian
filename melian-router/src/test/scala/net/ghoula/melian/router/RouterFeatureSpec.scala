@@ -510,10 +510,10 @@ class RouterFeatureSpec extends FunSuite {
     assert(header(response, "Location").isDefined, "Created must keep its Location header")
     assert(bodyText(response).contains("wrench"))
   }
-
   test("EventStream responses carry the warnings header when the body decoded with warnings") {
-    val handler: Json[PartialCmd] => Eru[Nothing, EventStream[ChunkStream]] =
-      (_: Json[PartialCmd]) => Eru.succeed(EventStream(ServerSentEvent.toChunkStream(List(ServerSentEvent.data("hi")))))
+    val handler: Json[PartialCmd] => Eru[Nothing, EventStream[ServerSentEvent]] =
+      (_: Json[PartialCmd]) =>
+        Eru.succeed(EventStream(EventSource.fromServerSentEvents(List(ServerSentEvent.data("hi")))))
 
     val router = Router.builder.post("/sse-warn", handler).build.getOrElse(fail("build failed"))
     val response = run(

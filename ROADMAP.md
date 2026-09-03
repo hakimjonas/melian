@@ -18,8 +18,8 @@ Melian is part of the same ecosystem but not released:
 
 - Dependencies resolve the published artifacts: `eru-http-server` at 1.0.0-alpha.1, `sarati` at 1.0.0-alpha.2, `rumil-parsers` at 1.0.0-alpha.3; `valar-core` at 0.6.0; `munit` at 1.3.5.
 - Toolchain: sbt 2.0.7, Scala 3.8.4, JDK 25.
-- Publishing is configured for Maven Central (`localStaging` + `sonaRelease`, signed by sbt-pgp), but no tag has been cut.
-- `main` branch, GPL-3.0-or-later license, GitHub workflows, and governance files are in place. The repository has no remote yet.
+- Publishing is configured for Maven Central (`localStaging` + `sonaRelease`, signed by sbt-pgp); no tag is currently cut. (An earlier `v1.0.0-alpha` tag was cut at `2cfb08a` and removed along with its failed release run — nothing was ever published, so the version name is clean.)
+- `main` branch, GPL-3.0-or-later license, GitHub workflows, and governance files are in place. Remote: `git@github.com:hakimjonas/melian.git`; CI runs on `main` pushes.
 - Documentation: `README.md` (overview and quickstart), `DESIGN.md` (architecture, with the remaining planned sections marked), `CHANGELOG.md`, and this roadmap.
 - All modules compile under `-Werror`; the test suite passes.
 
@@ -41,7 +41,7 @@ CORS, request logging, request IDs, auth, error handling, compression, and body 
   - `Json[A]`: JSON only (Rumil parse → Sarati decode → Valar validate). Parsing is resilient by default; recovered errors become warnings.
   - `Coded[A]`: Content-Type dispatch across `application/json`, `application/xml`, `application/yaml`, then the same decode + validate pipeline. The three decoders are bundled as a `CodedDecoder[A]`, derivable for case classes (`CodedDecoder.derived`); a missing/unsupported Content-Type answers 415.
   - `Form[A]`: `application/x-www-form-urlencoded`, decoded by a `FormDecoder[A]` (derivable for case classes via `FormDecoder.derived`), then Valar validated. Form keys outside the decoder's `knownFields` become warnings.
-- Response wrappers: `Ok[A]`, `Created[A]` (Location), `Accepted[A]`, `NoContent`, `SeeOther` (Location), `NotModified`, `EventStream[A]`, `Unauthorized[A]` (challenge → `WWW-Authenticate`), `TooManyRequests[A]` (duration → `Retry-After`), and `Status[Code, A]` for any other body-carrying status via a phantom literal (validated at compile time: in range, body allowed, no required headers).
+- Response wrappers: `Ok[A]`, `Created[A]` (Location), `Accepted[A]`, `NoContent`, `SeeOther` (Location), `NotModified`, `EventStream[A]` (typed JSON events over a pull-based `EventSource[A]`, or raw `ServerSentEvent` passthrough), `Unauthorized[A]` (challenge → `WWW-Authenticate`), `TooManyRequests[A]` (duration → `Retry-After`), and `Status[Code, A]` for any other body-carrying status via a phantom literal (validated at compile time: in range, body allowed, no required headers).
 - Error rendering, three tiers: an `ErrorRenderer[E]` given at the registration site (endpoint tier) beats the builder-level `.errorRenderer(...)` cursor (group/global tier), which beats the built-in RFC 9457 problem-details 500 fallback (no detail leakage).
 - Response content negotiation: declaring a `Header[Accept]` parameter builds a `ResponseNegotiator` from the encoders that exist for the body type (`Encoder[A, JsonValue]` baseline; `Encoder[A, XmlNode]` / `Encoder[A, YamlValue]` opt-in). Q-value dispatch per RFC 9110 §12.5.1, server preference on ties, 406 problem+json when nothing matches. Routes without `Header[Accept]` keep the zero-overhead JSON path.
 - Decode warnings: `X-Melian-Warnings: <n> decode warning(s)` on responses when lenient body parsing recovered anything; the same list reaches Endpoint handlers via `RequestContext.warnings`.
@@ -106,7 +106,7 @@ artifacts and suggested shapes -- live in `../ecosystem-findings-from-melian.md`
 
 ### Definition of done
 
-Each feature ships with tests, a CHANGELOG entry, and its DESIGN.md marker flipped from Planned to implemented; `sbt check` must pass. Notes for the session: `sbt test` behaves as `testQuick`, so use `sbt "router/Test/testOnly ..."` or a clean build for a full run; scalafix `DisableSyntax` bans `asInstanceOf`, `var`, `null`, and `throw`, so the documented erase-then-recover cast pattern carries a `// scalafix:ok DisableSyntax.asInstanceOf` suppression; the CI workflows are being reworked and may differ from the current files.
+Each feature ships with tests, a CHANGELOG entry, and its DESIGN.md marker flipped from Planned to implemented; `sbt check` must pass. Notes for the session: `sbt test` behaves as `testQuick`, so use `sbt "router/Test/testOnly ..."` or a clean build for a full run; scalafix `DisableSyntax` bans `asInstanceOf`, `var`, `null`, and `throw`, so the documented erase-then-recover cast pattern carries a `// scalafix:ok DisableSyntax.asInstanceOf` suppression.
 
 ## Benchmark
 
