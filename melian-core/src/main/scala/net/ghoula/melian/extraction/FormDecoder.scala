@@ -14,6 +14,12 @@ import net.ghoula.melian.FieldError
   */
 trait FormDecoder[A] {
   def decode(form: Map[String, String]): Either[Vector[FieldError], A]
+
+  /** The field names this decoder reads. Form keys outside this set are reported as decode warnings
+    * (not errors) by the [[net.ghoula.melian.Form]] pipeline. Empty by default, which disables the
+    * check: hand-written decoders opt in by declaring the fields they consume.
+    */
+  def knownFields: Set[String] = Set.empty
 }
 
 object FormDecoder {
@@ -70,6 +76,7 @@ object FormDecoder {
             Right($m.fromProduct(Tuple.fromArray(values)))
           }
         }
+        override def knownFields: Set[String] = Set(${ Expr.ofList(names.map(Expr(_))) }*)
       }
     }
   }

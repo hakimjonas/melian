@@ -1,5 +1,6 @@
 package net.ghoula.melian.router
 
+import net.ghoula.eru.Eru
 import net.ghoula.eru.http.{Body, MediaType, Response, StatusCode}
 import net.ghoula.melian.{ExtractionError, ExtractionSource, FieldError, RequestError}
 import net.ghoula.sarati.ast.json.{JsonValue, compactFormat, formatJson}
@@ -13,9 +14,10 @@ object ProblemDetails {
 
   private val problemJsonMediaType: MediaType = MediaType("application", "problem+json")
 
-  /* 422 Unprocessable Content is not in eru-http's StatusCode set, so it is
-   * constructed through the validating `apply` (the code is constant and valid). */
+  /* 422 Unprocessable Content and 406 Not Acceptable are not in eru-http's StatusCode set, so they
+   * are constructed through the validating `apply` (the codes are constant and valid). */
   private val UnprocessableContent: StatusCode = StatusCode(422).unsafeRunSync()
+  private val NotAcceptable: StatusCode = StatusCode(406).unsafeRunSync()
 
   def render(error: RequestError): Response[Body] = {
     val (status, json) = error match {
@@ -35,11 +37,37 @@ object ProblemDetails {
           case None => s"Expected one of ${expected.mkString(", ")}, Content-Type header missing"
         }
         (StatusCode.UnsupportedMediaType, simple("Unsupported Media Type", detail))
+      case RequestError.NotAcceptable(supported, acceptHeader) =>
+        (
+          NotAcceptable,
+          simple(
+            "Not Acceptable",
+            s"Accept header '$acceptHeader' matches none of ${supported.mkString(", ")}"
+          )
+        )
     }
     Response(
       status,
       net.ghoula.eru.http.Headers.empty,
       Body.text(formatJson(json, compactFormat), problemJsonMediaType)
+    )
+  }
+
+  /** The built-in global error tier: renders a domain error that no `ErrorRenderer` given and no
+    * builder-level renderer claimed as a generic 500 problem+json. The error value is deliberately
+    * not serialized -- `toString` of an arbitrary domain error can leak internals.
+    */
+  def renderDomainFallback(error: Any): Eru[Nothing, Response[Body]] = {
+    val _ = error
+    Eru.succeed(
+      Response(
+        StatusCode.InternalServerError,
+        net.ghoula.eru.http.Headers.empty,
+        Body.text(
+          formatJson(simple("Internal Server Error", "The server failed to process the request"), compactFormat),
+          problemJsonMediaType
+        )
+      )
     )
   }
 

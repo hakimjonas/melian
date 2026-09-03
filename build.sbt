@@ -56,9 +56,9 @@ val sharedScalacOptions: Seq[String] = Seq(
 )
 
 // ===== Dependency Versions =====
-val eruHttpVersion: String = "1.0.0-alpha"
-val saratiVersion: String = "1.0.0-alpha"
-val rumilVersion: String = "1.0.0-alpha"
+val eruHttpVersion: String = "1.0.0-alpha.1"
+val saratiVersion: String = "1.0.0-alpha.2"
+val rumilVersion: String = "1.0.0-alpha.3"
 val valarVersion: String = "0.6.0"
 val munitVersion: String = "1.3.5"
 
@@ -84,6 +84,8 @@ lazy val router = (project in file("melian-router"))
       "net.ghoula" %% "sarati" % saratiVersion,
       "net.ghoula" %% "rumil-parsers" % rumilVersion,
       "net.ghoula" %% "valar-core" % valarVersion,
+      // WebSocket routes perform the RFC 6455 upgrade through eru-http's server runtime.
+      "net.ghoula" %% "eru-http-server" % eruHttpVersion,
       "org.scalameta" %% "munit" % munitVersion % Test
     ),
     javaOptions ++= Seq("-XX:+UseZGC"),

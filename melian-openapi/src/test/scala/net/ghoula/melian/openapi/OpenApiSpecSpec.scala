@@ -479,4 +479,73 @@ class OpenApiSpecSpec extends FunSuite {
     }
     assertEquals(otherBody, "inner")
   }
+
+  test("explicit operationId is emitted, otherwise derived from method and path") {
+    val explicit = getRoute.copy(operationId = Some("getUser"))
+    val spec = OpenApiSpec.generate(info, Vector(explicit))
+    val output = json(spec)
+    assert(output.contains("\"operationId\":\"getUser\""), s"Missing explicit operationId: $output")
+
+    val derived = OpenApiSpec.generate(info, Vector(getRoute))
+    val derivedOutput = json(derived)
+    assert(
+      derivedOutput.contains("\"operationId\":\"getUsersById\""),
+      s"Missing derived operationId: $derivedOutput"
+    )
+  }
+
+  test("derived operationId is a valid identifier for odd paths") {
+    val op = getRoute.copy(pathTemplate = "/workspaces/:workspaceId/posts/:postId", operationId = None)
+    val spec = OpenApiSpec.generate(info, Vector(op))
+    val output = json(spec)
+    assert(
+      output.contains("\"operationId\":\"getWorkspacesByWorkspaceIdPostsByPostId\""),
+      s"Missing derived operationId: $output"
+    )
+  }
+
+  test("negotiating routes document every response media type") {
+    val negotiating =
+      getRoute.copy(responseMediaTypes = Vector("application/json", "application/xml", "application/yaml"))
+    val spec = OpenApiSpec.generate(info, Vector(negotiating))
+    val output = json(spec)
+    assert(output.contains("\"application/json\""), s"Missing json: $output")
+    assert(output.contains("\"application/xml\""), s"Missing xml: $output")
+    assert(output.contains("\"application/yaml\""), s"Missing yaml: $output")
+  }
+
+  test("WebSocket operations are marked with the x-websocket extension") {
+    val wsOp = OperationSchema(
+      pathTemplate = "/ws/:id",
+      method = "GET",
+      parameters = Vector.empty,
+      requestBody = None,
+      responseStatus = 101,
+      responseBody = None,
+      isEventStream = false,
+      isWebSocket = true
+    )
+    val spec = OpenApiSpec.generate(info, Vector(wsOp))
+    val output = json(spec)
+    assert(output.contains("\"x-websocket\":true"), s"Missing x-websocket: $output")
+  }
+
+  test("Unauthorized and TooManyRequests operations document their required headers") {
+    val op = OperationSchema(
+      pathTemplate = "/secure",
+      method = "GET",
+      parameters = Vector.empty,
+      requestBody = None,
+      responseStatus = 401,
+      responseBody = Some(TypeSchema.StringSchema),
+      responseHeaders = Vector(
+        ResponseHeaderSchema("WWW-Authenticate", Some("Authentication challenge"), required = true)
+      ),
+      isEventStream = false
+    )
+    val spec = OpenApiSpec.generate(info, Vector(op))
+    val output = json(spec)
+    assert(output.contains("\"401\""), s"Missing 401: $output")
+    assert(output.contains("\"WWW-Authenticate\""), s"Missing WWW-Authenticate: $output")
+  }
 }

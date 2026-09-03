@@ -12,14 +12,16 @@ import net.ghoula.valar.{ValidationResult, Validator}
 /** Decodes an `application/x-www-form-urlencoded` request body for [[net.ghoula.melian.Form]].
   *
   * The body is parsed to a flat field map, decoded with the user-supplied [[FormDecoder]], then
-  * validated with Valar: the same decode-then-validate shape as JSON and Coded bodies.
+  * validated with Valar: the same decode-then-validate shape as JSON and Coded bodies. Form keys
+  * the decoder does not declare in `FormDecoder.knownFields` surface as warnings on the returned
+  * [[SaratiBridge.DecodeResult]].
   */
 object FormBody {
 
   def decode[A](body: Body)(using
     formDecoder: FormDecoder[A],
     validator: Validator[A]
-  ): Eru[RequestError, A] =
+  ): Eru[RequestError, SaratiBridge.DecodeResult[A]] =
     if body.isEmpty then Eru.fail(RequestError.BodyMissing)
     else
       CodedBody
@@ -29,11 +31,16 @@ object FormBody {
           parseForm(text) match {
             case Left(err) => Eru.fail(RequestError.DecodeFailed(List(err)))
             case Right(form) =>
+              // Only decoders that declare the fields they consume participate in the unknown-key
+              // check; the empty default (hand-written decoders) must not flag every field.
+              val warnings =
+                if formDecoder.knownFields.isEmpty then Nil
+                else form.keySet.diff(formDecoder.knownFields).toList.sorted.map(k => s"unknown form field: $k")
               formDecoder.decode(form) match {
                 case Left(fieldErrors) => Eru.fail(RequestError.ValidationFailed(fieldErrors))
                 case Right(value) =>
                   validator.validate(value) match {
-                    case ValidationResult.Valid(v) => Eru.succeed(v)
+                    case ValidationResult.Valid(v) => Eru.succeed(SaratiBridge.DecodeResult(v, warnings))
                     case ValidationResult.Invalid(errs) =>
                       Eru.fail(
                         RequestError.ValidationFailed(

@@ -15,6 +15,7 @@ enum RequestError derives CanEqual {
   case ValidationFailed(errors: Vector[FieldError])
   case BodyMissing
   case UnsupportedMediaType(expected: List[MediaType], actual: Option[MediaType])
+  case NotAcceptable(supported: List[MediaType], acceptHeader: String)
 }
 
 /** Where an extraction error originated. */

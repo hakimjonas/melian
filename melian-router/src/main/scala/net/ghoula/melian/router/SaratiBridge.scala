@@ -61,16 +61,23 @@ object SaratiBridge {
 
   // --- Richer decode preserving warnings (Girdle pipeline) ---
 
-  def decodeJsonBody[A](body: Body)(using
+  /** Decodes a JSON body.
+    *
+    * Resilient mode (default): a syntax error recovered at a structural boundary, or a Sarati
+    * partial decode, becomes a warning on the returned [[DecodeResult]]. Strict mode: any
+    * non-`Success` from either stage fails the request instead.
+    */
+  def decodeJsonBody[A](body: Body, strict: Boolean = false)(using
     sarati: Decoder[JsonValue, A]
   ): Eru[DecodeError, DecodeResult[A]] =
     CodedBody.readText(body).flatMap { text =>
       parseJson(text) match {
         case RumilResult.Success(json, _) =>
-          guardDepth(json).flatMap(j => decodeSarati(j, Nil))
+          guardDepth(json).flatMap(j => decodeSarati(j, Nil, strict))
         case RumilResult.Partial(json, parseErrors, _) =>
           val warnings = parseErrors.map(e => s"parse warning: $e")
-          guardDepth(json).flatMap(j => decodeSarati(j, warnings))
+          if strict then Eru.fail(DecodeError(s"JSON parse failed: ${parseErrors.mkString("; ")}", None))
+          else guardDepth(json).flatMap(j => decodeSarati(j, warnings, strict))
         case RumilResult.Failure(errors, _) =>
           Eru.fail(DecodeError(s"JSON parse failed: ${errors.mkString("; ")}", None))
       }
@@ -92,15 +99,18 @@ object SaratiBridge {
 
   // --- Sarati decode with warning accumulation ---
 
-  private def decodeSarati[A](json: JsonValue, priorWarnings: List[String])(using
+  private def decodeSarati[A](json: JsonValue, priorWarnings: List[String], strict: Boolean)(using
     sarati: Decoder[JsonValue, A]
   ): Eru[DecodeError, DecodeResult[A]] =
     sarati.decode(json) match {
       case SaratiResult.Success(value, _) =>
         Eru.succeed(DecodeResult(value, priorWarnings))
       case SaratiResult.Partial(value, decodeErrors, _) =>
-        val decodeWarnings = decodeErrors.map(e => s"decode warning: $e")
-        Eru.succeed(DecodeResult(value, priorWarnings ++ decodeWarnings))
+        if strict then Eru.fail(DecodeError(s"Decode failed: ${decodeErrors.mkString("; ")}", None))
+        else {
+          val decodeWarnings = decodeErrors.map(e => s"decode warning: $e")
+          Eru.succeed(DecodeResult(value, priorWarnings ++ decodeWarnings))
+        }
       case SaratiResult.Failure(errors, _) =>
         Eru.fail(DecodeError(s"Decode failed: ${errors.mkString("; ")}", None))
     }

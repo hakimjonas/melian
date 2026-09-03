@@ -101,9 +101,12 @@ object SchemaGen {
     responseStatus: Int,
     responseBodyType: q.reflect.TypeRepr,
     isEventStream: Boolean,
+    operationId: Option[String],
+    responseMediaTypes: Vector[String],
     summary: Option[String],
     description: Option[String],
-    tags: Vector[String]
+    tags: Vector[String],
+    isWebSocket: Boolean = false
   ): Expr[OperationSchema] = {
     import q.reflect.*
 
@@ -111,6 +114,13 @@ object SchemaGen {
     val methodExpr = Expr(method)
     val statusExpr = Expr(responseStatus)
     val isEventStreamExpr = Expr(isEventStream)
+    val isWebSocketExpr = Expr(isWebSocket)
+    val operationIdExpr = operationId match {
+      case Some(id) => '{ Some(${ Expr(id) }) }
+      case None => '{ None }
+    }
+    val responseMediaTypesExpr =
+      '{ Vector(${ Varargs(responseMediaTypes.map(Expr(_))) }*) }
     val summaryExpr = summary match {
       case Some(s) => '{ Some(${ Expr(s) }) }
       case None => '{ None }
@@ -132,10 +142,7 @@ object SchemaGen {
 
     val paramExprs: List[Expr[ParameterSchema]] =
       paramTypes.zip(info.params).zipWithIndex.flatMap { case ((tpe, paramInfo), idx) =>
-        val innerType = tpe match {
-          case AppliedType(_, args) if args.nonEmpty => args.last
-          case other => other
-        }
+        val innerType = HandlerIntrospection.innerTypeOf(tpe)
 
         paramInfo.kind match {
           case HandlerIntrospection.ParamKind.PathParam =>
@@ -175,10 +182,7 @@ object SchemaGen {
 
     val requestBodyExpr: Expr[Option[TypeSchema]] = bodyParam match {
       case Some((tpe, _)) =>
-        val innerType = tpe match {
-          case AppliedType(_, args) if args.nonEmpty => args.last
-          case other => other
-        }
+        val innerType = HandlerIntrospection.innerTypeOf(tpe)
         val schema = schemaFor(innerType, Set.empty)
         '{ Some($schema) }
       case None => '{ None }
@@ -197,6 +201,10 @@ object SchemaGen {
         '{ Vector(ResponseHeaderSchema("Location", Some("URI of the created resource"), required = true)) }
       case "SeeOther" =>
         '{ Vector(ResponseHeaderSchema("Location", Some("URI to redirect to"), required = true)) }
+      case "Unauthorized" =>
+        '{ Vector(ResponseHeaderSchema("WWW-Authenticate", Some("Authentication challenge"), required = true)) }
+      case "TooManyRequests" =>
+        '{ Vector(ResponseHeaderSchema("Retry-After", Some("Seconds to wait before retrying"), required = true)) }
       case _ => '{ Vector.empty[ResponseHeaderSchema] }
     }
 
@@ -222,6 +230,9 @@ object SchemaGen {
         responseBody = $responseBodyExpr,
         responseHeaders = $responseHeadersExpr,
         isEventStream = $isEventStreamExpr,
+        isWebSocket = $isWebSocketExpr,
+        operationId = $operationIdExpr,
+        responseMediaTypes = $responseMediaTypesExpr,
         summary = $summaryExpr,
         description = $descriptionExpr,
         tags = $tagsExpr
@@ -248,8 +259,15 @@ object SchemaGen {
     }
   }
 
-  def responseStatusCode(using q: Quotes)(wrapperName: String): Int = {
+  /** The status code for a route's response wrapper, resolved at compile time.
+    *
+    * `Status[Code, A]` reads its code from the literal type argument and is validated here: the
+    * code must be a valid status (100-599) that allows a body and requires no headers -- a status
+    * with mandatory headers has a dedicated wrapper or belongs to the router.
+    */
+  def responseStatusCode(using q: Quotes)(wrapperName: String, responseTypeRepr: q.reflect.TypeRepr): Int = {
     import q.reflect.*
+    import net.ghoula.eru.http.StatusCode
     wrapperName match {
       case "Ok" => 200
       case "Created" => 201
@@ -258,9 +276,38 @@ object SchemaGen {
       case "SeeOther" => 303
       case "NotModified" => 304
       case "EventStream" => 200
+      case "Unauthorized" => 401
+      case "TooManyRequests" => 429
+      case "Status" =>
+        val code = responseTypeRepr.dealias match {
+          case AppliedType(_, args) if args.nonEmpty =>
+            args.head.dealias match {
+              case ConstantType(IntConstant(c)) => c
+              case other =>
+                report.errorAndAbort(
+                  s"Status[Code, A] requires a literal Int status code, got: ${other.show}. Use e.g. Status[206, A]."
+                )
+            }
+          case other =>
+            report.errorAndAbort(s"Cannot read Status[Code, A] status code from: ${other.show}")
+        }
+        if code < 100 || code >= 600 then
+          report.errorAndAbort(s"Status[$code, A]: status codes must be between 100 and 599.")
+        val statusCode = StatusCode(code).unsafeRunSync()
+        if !statusCode.allowsResponseBody then
+          report.errorAndAbort(
+            s"Status[$code, A]: status $code does not allow a response body. Use NoContent or NotModified."
+          )
+        if statusCode.requiredHeaders.nonEmpty then
+          report.errorAndAbort(
+            s"Status[$code, A]: status $code requires the ${statusCode.requiredHeaders.mkString(", ")} header(s), " +
+              "which the Status wrapper cannot carry. Use a dedicated response wrapper for that status."
+          )
+        code
       case other =>
         report.errorAndAbort(
-          s"Unknown response wrapper type: $other. Handlers must return Ok[A], Created[A], Accepted[A], NoContent, SeeOther, NotModified, or EventStream[A]."
+          s"Unknown response wrapper type: $other. Handlers must return Ok[A], Created[A], Accepted[A], NoContent, " +
+            "SeeOther, NotModified, EventStream[A], Unauthorized[A], TooManyRequests[A], or Status[Code, A]."
         )
     }
   }

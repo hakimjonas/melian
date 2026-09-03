@@ -26,7 +26,8 @@ object HandlerIntrospection {
     markerTypeRepr: Any,
     innerTypeRepr: Any,
     innerTypeShow: String,
-    queryParamName: Option[String] = None
+    queryParamName: Option[String] = None,
+    jsonStrict: Boolean = false
   )
 
   /** Compile-time info about the handler's response type. */
@@ -100,23 +101,52 @@ object HandlerIntrospection {
   private def classifyParam(using q: Quotes)(tpe: q.reflect.TypeRepr, index: Int): ParamInfo = {
     import q.reflect.*
 
-    tpe match {
+    // `Strict[Json[A]]` wraps the body marker: unwrap it and record the parse mode.
+    def classifyMarker(markerType: TypeRepr, strict: Boolean): ParamInfo = markerType match {
+      case AppliedType(base, List(inner0))
+          if base.typeSymbol.fullName.startsWith(melianPackage) && base.typeSymbol.name == "Strict" =>
+        classifyMarker(inner0, strict = true)
       case AppliedType(base, List(nameType, inner))
           if base.typeSymbol.fullName.startsWith(melianPackage) && base.typeSymbol.name == "Query" =>
         val paramName = nameType match {
           case ConstantType(StringConstant(name)) => name
           case other => report.errorAndAbort(s"Query parameter name must be a string literal, got: ${other.show}")
         }
-        ParamInfo(index, ParamKind.QueryParam, tpe, inner, inner.show, queryParamName = Some(paramName))
+        ParamInfo(
+          index,
+          ParamKind.QueryParam,
+          markerType,
+          inner,
+          inner.show,
+          queryParamName = Some(paramName),
+          jsonStrict = strict
+        )
       case AppliedType(base, List(inner)) =>
         val fullName = base.typeSymbol.fullName
         val simpleName = base.typeSymbol.name
         val kind =
           if fullName.startsWith(melianPackage) then markerSuffixes.getOrElse(simpleName, ParamKind.Unknown)
           else ParamKind.Unknown
-        ParamInfo(index, kind, tpe, inner, inner.show)
+        ParamInfo(index, kind, markerType, inner, inner.show, jsonStrict = strict)
       case _ =>
-        ParamInfo(index, ParamKind.Unknown, tpe, tpe, tpe.show)
+        ParamInfo(index, ParamKind.Unknown, markerType, markerType, markerType.show, jsonStrict = strict)
+    }
+
+    classifyMarker(tpe, strict = false)
+  }
+
+  /** The body/parameter type under a Melian marker, unwrapping `Strict` too. For non-marker types
+    * this is the type itself.
+    */
+  def innerTypeOf(using q: Quotes)(tpe: q.reflect.TypeRepr): q.reflect.TypeRepr = {
+    import q.reflect.*
+    tpe match {
+      case AppliedType(base, args) if args.nonEmpty && base.typeSymbol.fullName.startsWith(melianPackage) =>
+        base.typeSymbol.name match {
+          case "Strict" => innerTypeOf(args.head)
+          case _ => args.last
+        }
+      case other => other
     }
   }
 
@@ -127,8 +157,11 @@ object HandlerIntrospection {
     unwrapped.dealias match {
       case AppliedType(eru, List(errorType, responseType)) if eru.typeSymbol.fullName == "net.ghoula.eru.Eru" =>
         responseType.dealias match {
-          case AppliedType(wrapper, List(body)) =>
-            ResponseInfo(errorType, wrapper.typeSymbol.name, Some(body), Some(body.show), isEndpoint)
+          case AppliedType(wrapper, args) if args.size == 1 =>
+            ResponseInfo(errorType, wrapper.typeSymbol.name, Some(args.head), Some(args.head.show), isEndpoint)
+          case AppliedType(wrapper, args) if args.size == 2 =>
+            // Status[Code, A]: the code is a phantom literal, the body is the second argument.
+            ResponseInfo(errorType, wrapper.typeSymbol.name, Some(args.last), Some(args.last.show), isEndpoint)
           case terminal =>
             // A case object (NoContent, NotModified) surfaces as its module class, whose name
             // carries a trailing `$`; strip it so the wrapper name is stable.

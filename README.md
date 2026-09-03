@@ -6,10 +6,12 @@ Melian is part of the Arda ecosystem and depends on [`eru`](https://github.com/h
 
 ## What it does
 
-- A route is a function. Its parameters say where request data comes from: `Path[A]`, `Query[name, A]`, `Header[A]`, `Json[A]`, `Coded[A]`, `Form[A]`. The macro generates the extraction and the validation pipeline.
-- The return type carries HTTP semantics. `Created[A]` is 201 and must have a `Location` header; `NoContent` is 204 and has no body; a GET handler cannot take a body parameter. A violation is a compile error.
-- Extraction, decode, and validation errors accumulate into one RFC 9457 problem-details response. Domain errors render through an `ErrorRenderer[E]` typeclass.
-- OpenAPI 3.1 is generated from the same types the compiler checks, so the specification cannot drift from the implementation.
+- A route is a function. Its parameters say where request data comes from: `Path[A]`, `Query[name, A]`, `Header[A]`, `Json[A]`, `Coded[A]`, `Form[A]`. The macro generates the extraction and the validation pipeline. JSON bodies parse resiliently by default (recovered errors become warnings); `Strict[Json[A]]` rejects on the first error.
+- The return type carries HTTP semantics. `Created[A]` is 201 and must have a `Location` header; `NoContent` is 204 and has no body; `Unauthorized[A]` emits `WWW-Authenticate`; `TooManyRequests[A]` emits `Retry-After`; `Status[Code, A]` serves any other status via a phantom literal, checked at compile time. A violation is a compile error.
+- Extraction, decode, and validation errors accumulate into one RFC 9457 problem-details response. Domain errors render through a three-tier error model: an `ErrorRenderer[E]` given (endpoint), a builder-level renderer (group), and a built-in problem-details fallback.
+- Declaring a `Header[Accept]` parameter enables response content negotiation (JSON by default, XML/YAML by encoder presence, RFC 9110 q-value dispatch, 406 when nothing matches).
+- Typed WebSocket endpoints via `Router.builder.websocket`: a `WebSocketSession` with typed `receive`/`send`, strictly validated inbound messages, and the RFC 6455 upgrade handled by eru-http.
+- OpenAPI 3.1 is generated from the same types the compiler checks, so the specification cannot drift from the implementation; every operation carries a stable `operationId`.
 - `HEAD` is derived from `GET` (RFC 9110 §9.3.2). `QUERY` (RFC 10008) is supported.
 
 ## Requirements
@@ -80,10 +82,10 @@ A `Coded[A]` body accepts JSON, XML, and YAML and dispatches on `Content-Type`. 
 
 | Module | Purpose |
 | --- | --- |
-| `melian-core` | Markers, response types, error model, extraction typeclasses |
-| `melian-router` | The compile-time router, macro, and body decoding |
+| `melian-core` | Markers, response types, error model, extraction typeclasses, WebSocket session |
+| `melian-router` | The compile-time router, macro, body decoding, and WebSocket upgrade dispatch |
 | `melian-openapi` | OpenAPI 3.1 generation and Swagger UI |
-| `melian-server` | `MelianServer` entry point, static files, security headers, error pages, health |
+| `melian-server` | `MelianServer` entry points, static files, security headers, error pages, health, CSRF, sessions, rate limiting |
 | `melian-test` | `MelianTestKit` for testing routers without a server |
 
 CORS, request logging, request IDs, authentication, error handling, compression, and body limits are provided by `eru-http`'s `Middleware` and compose with `MelianServer.serveWith`.

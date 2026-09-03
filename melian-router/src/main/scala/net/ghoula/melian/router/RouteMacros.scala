@@ -2,6 +2,8 @@ package net.ghoula.melian.router
 
 import scala.quoted.*
 
+import net.ghoula.melian.MelianHeaders
+
 object RouteMacros {
 
   def addRoute[H: Type](
@@ -9,6 +11,7 @@ object RouteMacros {
     path: Expr[String],
     handler: Expr[H],
     methodStr: Expr[String],
+    operationId: Expr[String],
     summary: Expr[String],
     description: Expr[String],
     tags: Expr[String]
@@ -17,6 +20,7 @@ object RouteMacros {
 
     val pathStr = path.valueOrAbort
     val method = methodStr.valueOrAbort
+    val operationIdStr = operationId.value.getOrElse("")
     val summaryStr = summary.value.getOrElse("")
     val descriptionStr = description.value.getOrElse("")
     val tagsVec = tags.value.getOrElse("").split(",").map(_.trim).filter(_.nonEmpty).toVector
@@ -29,6 +33,7 @@ object RouteMacros {
     val info = HandlerIntrospection.analyze[H]
     verifyPathParams(method, pathStr, template, info)
     verifyMethodConstraints(method, pathStr, info)
+    val templateParamNames = template.paramNames
 
     val methodExpr = method match {
       case "GET" => '{ net.ghoula.eru.http.Method.GET }
@@ -52,10 +57,15 @@ object RouteMacros {
       case _ => (TypeRepr.of[Nothing], TypeRepr.of[Nothing])
     }
     val bodyTypeRepr = responseTypeRepr.dealias match {
-      case AppliedType(_, List(b)) => b
+      case AppliedType(_, args) if args.nonEmpty => args.last
       case _ => TypeRepr.of[Nothing]
     }
     val returnsEndpoint = info.response.isEndpoint
+
+    val paramTypes = TypeRepr.of[H].dealias match {
+      case AppliedType(_, args) => args.init
+      case _ => report.errorAndAbort("Cannot decompose handler type")
+    }
 
     val isEventStream = info.response.wrapperName == "EventStream"
 
@@ -63,10 +73,23 @@ object RouteMacros {
     // macro must not summon a BodyEncoder for them: there is nothing to encode.
     val hasResponseBody = info.response.bodyTypeRepr.isDefined
 
+    // Response-side content negotiation engages when the handler declares Header[Accept] and the
+    // wrapper carries a body. The media types offered are exactly those with an encoder.
+    val negotiatesContent =
+      !isEventStream && hasResponseBody && info.params.exists { p =>
+        p.kind == HandlerIntrospection.ParamKind.HeaderParam &&
+        HandlerIntrospection.innerTypeOf(paramTypes(p.index)) =:=
+          TypeRepr.of[net.ghoula.melian.extraction.FromHeader.Accept]
+      }
+
+    val responseStatus =
+      SchemaGen.responseStatusCode(info.response.wrapperName, responseTypeRepr)
+    val customStatusCode = Option.when(info.response.wrapperName == "Status")(responseStatus)
+
     (errorTypeRepr.asType, responseTypeRepr.asType, bodyTypeRepr.asType) match {
       case ('[e], '[r], '[b]) =>
         val bodyEncoderExpr: Option[Expr[net.ghoula.eru.http.BodyEncoder[b]]] =
-          if isEventStream || !hasResponseBody then None
+          if isEventStream || !hasResponseBody || negotiatesContent then None
           else
             Some(
               summonOrAbort[net.ghoula.eru.http.BodyEncoder[b]](
@@ -76,14 +99,48 @@ object RouteMacros {
                 s"BodyEncoder[${Type.show[b]}]"
               )
             )
-        val errorRendererExpr =
-          summonOrAbort[net.ghoula.melian.ErrorRenderer[e]](method, pathStr, "error", s"ErrorRenderer[${Type.show[e]}]")
 
-        val paramTypes = TypeRepr.of[H].dealias match {
-          case AppliedType(_, args) => args.init
-          case _ => report.errorAndAbort("Cannot decompose handler type")
-        }
-        val templateParamNames = template.paramNames
+        // Negotiation needs the Sarati encoders directly: JSON is the baseline, XML and YAML are
+        // opt-in via their encoders' presence.
+        val negotiatedMediaTypes: Vector[String] =
+          if !negotiatesContent then Vector("application/json")
+          else {
+            val base = Vector("application/json")
+            val withXml =
+              if Expr.summon[net.ghoula.sarati.codec.Encoder[b, net.ghoula.sarati.ast.xml.XmlNode]].isDefined
+              then base :+ "application/xml"
+              else base
+            if Expr.summon[net.ghoula.sarati.codec.Encoder[b, net.ghoula.sarati.ast.yaml.YamlValue]].isDefined
+            then withXml :+ "application/yaml"
+            else withXml
+          }
+
+        val negotiatorExpr: Option[Expr[ResponseNegotiator[b]]] =
+          if !negotiatesContent then None
+          else {
+            val jsonEnc = summonOrAbort[net.ghoula.sarati.codec.Encoder[b, net.ghoula.sarati.ast.json.JsonValue]](
+              method,
+              pathStr,
+              "response",
+              s"Encoder[${Type.show[b]}, JsonValue]"
+            )
+            val xmlEnc = Expr.summon[net.ghoula.sarati.codec.Encoder[b, net.ghoula.sarati.ast.xml.XmlNode]]
+            val yamlEnc = Expr.summon[net.ghoula.sarati.codec.Encoder[b, net.ghoula.sarati.ast.yaml.YamlValue]]
+            val xmlOpt = xmlEnc match {
+              case Some(enc) => '{ Some($enc) }
+              case None => '{ None }
+            }
+            val yamlOpt = yamlEnc match {
+              case Some(enc) => '{ Some($enc) }
+              case None => '{ None }
+            }
+            Some('{ ResponseNegotiator[b]($jsonEnc, $xmlOpt, $yamlOpt) })
+          }
+
+        // Error rendering tiers: an ErrorRenderer given in scope (endpoint tier) wins; otherwise
+        // the builder-level renderer active at this registration (group/global tier), with the
+        // built-in problem-details 500 as the last resort.
+        val summonedErrorRenderer = Expr.summon[net.ghoula.melian.ErrorRenderer[e]]
 
         val handlerExpr: Expr[HandlerFn] = '{
           (request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], pathParams: Map[String, String]) =>
@@ -103,14 +160,12 @@ object RouteMacros {
               // and the handler call needs no asInstanceOf.
               if paramTypes.size == 1 then {
                 val (tpe, paramInfo) = (paramTypes.head, info.params.head)
-                val innerType = tpe match {
-                  case AppliedType(_, args) if args.nonEmpty => args.last
-                  case other => other
-                }
+                val innerType = HandlerIntrospection.innerTypeOf(using q)(tpe)
                 innerType.asType match {
                   case '[a] =>
-                    if paramInfo.kind == HandlerIntrospection.ParamKind.JsonBody then {
-                      val extraction = mkJsonBodyExtraction[a]('request, pathStr, method)
+                    if isDecodeResultKind(paramInfo.kind) then {
+                      val extraction =
+                        mkDecodeBodyExtraction[a](paramInfo, 'request, pathStr, method, paramInfo.jsonStrict)
                       '{
                         $extraction.flatMap { (result: SaratiBridge.DecodeResult[a]) =>
                           ${
@@ -118,8 +173,11 @@ object RouteMacros {
                               List('{ result.value }),
                               '{ result.warnings },
                               handler,
+                              builder,
+                              summonedErrorRenderer,
                               bodyEncoderExpr,
-                              errorRendererExpr,
+                              negotiatorExpr,
+                              customStatusCode,
                               returnsEndpoint,
                               isEventStream,
                               'request,
@@ -139,8 +197,11 @@ object RouteMacros {
                               List('{ value }),
                               '{ List.empty[String] },
                               handler,
+                              builder,
+                              summonedErrorRenderer,
                               bodyEncoderExpr,
-                              errorRendererExpr,
+                              negotiatorExpr,
+                              customStatusCode,
                               returnsEndpoint,
                               isEventStream,
                               'request,
@@ -155,14 +216,12 @@ object RouteMacros {
               } else {
                 val typedExtractions: List[(Type[?], Expr[MEru[Any]])] =
                   paramTypes.zip(info.params).zipWithIndex.map { case ((tpe, paramInfo), idx) =>
-                    val innerType = tpe match {
-                      case AppliedType(_, args) if args.nonEmpty => args.last
-                      case other => other
-                    }
+                    val innerType = HandlerIntrospection.innerTypeOf(using q)(tpe)
                     innerType.asType match {
                       case '[a] =>
-                        if paramInfo.kind == HandlerIntrospection.ParamKind.JsonBody then {
-                          val extraction = mkJsonBodyExtraction[a]('request, pathStr, method)
+                        if isDecodeResultKind(paramInfo.kind) then {
+                          val extraction =
+                            mkDecodeBodyExtraction[a](paramInfo, 'request, pathStr, method, paramInfo.jsonStrict)
                           (Type.of[SaratiBridge.DecodeResult[a]], '{ $extraction: MEru[Any] })
                         } else {
                           val extraction =
@@ -172,23 +231,31 @@ object RouteMacros {
                     }
                   }
 
-                buildChain[H, e, r, b](
+                buildChain(
                   typedExtractions,
-                  handler,
-                  bodyEncoderExpr,
-                  errorRendererExpr,
-                  returnsEndpoint,
-                  isEventStream,
-                  'request,
-                  'pathParams,
-                  pathStr,
+                  base = { (typedArgs, warningsExpr) =>
+                    invokeHandlerAndEncode[H, e, r, b](
+                      typedArgs,
+                      warningsExpr,
+                      handler,
+                      builder,
+                      summonedErrorRenderer,
+                      bodyEncoderExpr,
+                      negotiatorExpr,
+                      customStatusCode,
+                      returnsEndpoint,
+                      isEventStream,
+                      'request,
+                      'pathParams,
+                      pathStr
+                    )
+                  },
                   Nil
                 )
               }
             }
         }
 
-        val responseStatus = SchemaGen.responseStatusCode(info.response.wrapperName)
         val schemaExpr = SchemaGen.operationSchema(
           pathStr,
           method,
@@ -198,6 +265,8 @@ object RouteMacros {
           responseStatus,
           bodyTypeRepr,
           isEventStream,
+          Option.when(operationIdStr.nonEmpty)(operationIdStr),
+          negotiatedMediaTypes,
           Option.when(summaryStr.nonEmpty)(summaryStr),
           Option.when(descriptionStr.nonEmpty)(descriptionStr),
           tagsVec
@@ -218,24 +287,42 @@ object RouteMacros {
     }
   }
 
+  /** Body markers whose extraction carries decode warnings. */
+  private def isDecodeResultKind(kind: HandlerIntrospection.ParamKind): Boolean =
+    kind == HandlerIntrospection.ParamKind.JsonBody ||
+      kind == HandlerIntrospection.ParamKind.CodedBody ||
+      kind == HandlerIntrospection.ParamKind.FormBody
+
+  /** Dispatches to the body extraction builder for each body marker kind. */
+  private def mkDecodeBodyExtraction[A: Type](using
+    q: Quotes
+  )(
+    paramInfo: HandlerIntrospection.ParamInfo,
+    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
+    pathStr: String,
+    method: String,
+    strict: Boolean
+  ): Expr[MEru[SaratiBridge.DecodeResult[A]]] = {
+    import q.reflect.*
+    paramInfo.kind match {
+      case HandlerIntrospection.ParamKind.JsonBody => mkJsonBodyExtraction[A](request, pathStr, method, strict)
+      case HandlerIntrospection.ParamKind.CodedBody => mkCodedBodyExtraction[A](request, pathStr, method, strict)
+      case HandlerIntrospection.ParamKind.FormBody => mkFormBodyExtraction[A](request, pathStr, method)
+      case other => report.errorAndAbort(s"Not a body marker kind: $other")
+    }
+  }
+
   /** Recursively builds e.attempt.flatMap { r => ... } chain.
     *
     * Each extraction is attempted (Eru[Nothing, Result[...]]). The flatMap never fails since
     * attempted effects always succeed. At the base case, all Result bindings are in scope and we
     * check for errors / call the handler.
     */
-  private def buildChain[H: Type, E: Type, R: Type, B: Type](using
+  private def buildChain(using
     q: Quotes
   )(
     remaining: List[(Type[?], Expr[MEru[Any]])],
-    handler: Expr[H],
-    bodyEncoder: Option[Expr[net.ghoula.eru.http.BodyEncoder[B]]],
-    errorRenderer: Expr[net.ghoula.melian.ErrorRenderer[E]],
-    returnsEndpoint: Boolean,
-    isEventStream: Boolean,
-    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
-    pathParams: Expr[Map[String, String]],
-    pathStr: String,
+    base: (List[Expr[Any]], Expr[List[String]]) => Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]],
     accumulated: List[(Type[?], Expr[net.ghoula.eru.Result[ErrType, Any]])]
   ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
 
@@ -296,20 +383,7 @@ object RouteMacros {
             if otherErrors.nonEmpty then net.ghoula.eru.Eru.fail(otherErrors.head: ErrType)
             else net.ghoula.eru.Eru.fail(net.ghoula.melian.RequestError.ExtractionFailed(extractionErrors): ErrType)
           } else {
-            ${
-              invokeHandlerAndEncode[H, E, R, B](
-                typedArgs,
-                warningsExpr,
-                handler,
-                bodyEncoder,
-                errorRenderer,
-                returnsEndpoint,
-                isEventStream,
-                request,
-                pathParams,
-                pathStr
-              )
-            }
+            ${ base(typedArgs, warningsExpr) }
           }
         }
 
@@ -317,16 +391,9 @@ object RouteMacros {
         '{
           $extractionExpr.attempt.flatMap { (result: net.ghoula.eru.Result[ErrType, Any]) =>
             ${
-              buildChain[H, E, R, B](
+              buildChain(
                 tail,
-                handler,
-                bodyEncoder,
-                errorRenderer,
-                returnsEndpoint,
-                isEventStream,
-                request,
-                pathParams,
-                pathStr,
+                base,
                 accumulated :+ (tpe, 'result)
               )
             }
@@ -347,8 +414,11 @@ object RouteMacros {
     typedArgs: List[Expr[Any]],
     warnings: Expr[List[String]],
     handler: Expr[H],
+    builder: Expr[RouterBuilder],
+    summonedErrorRenderer: Option[Expr[net.ghoula.melian.ErrorRenderer[E]]],
     bodyEncoder: Option[Expr[net.ghoula.eru.http.BodyEncoder[B]]],
-    errorRenderer: Expr[net.ghoula.melian.ErrorRenderer[E]],
+    negotiator: Option[Expr[ResponseNegotiator[B]]],
+    customStatusCode: Option[Int],
     returnsEndpoint: Boolean,
     isEventStream: Boolean,
     request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
@@ -381,9 +451,9 @@ object RouteMacros {
       '{
         $eruExpr.attempt.flatMap {
           case net.ghoula.eru.Result.Success(response) =>
-            encodeEventStream(response)
+            encodeEventStream(response, $warnings)
           case net.ghoula.eru.Result.Failure(domainError) =>
-            $errorRenderer.render(domainError)
+            ${ renderError[E]('domainError, builder, summonedErrorRenderer) }
         }
       }
     else {
@@ -391,13 +461,317 @@ object RouteMacros {
         case Some(e) => '{ Some($e) }
         case None => '{ None }
       }
+      val neg: Expr[Option[ResponseNegotiator[B]]] = negotiator match {
+        case Some(n) => '{ Some($n) }
+        case None => '{ None }
+      }
+      val statusExpr: Expr[Int] = customStatusCode match {
+        case Some(code) => Expr(code)
+        case None => Expr(0)
+      }
       '{
         $eruExpr.attempt.flatMap {
           case net.ghoula.eru.Result.Success(response) =>
-            encodeResponse[R, B](response, $enc, $pathTemplateExpr, $pathParams)
+            encodeResponse[R, B](
+              response,
+              $enc,
+              $neg,
+              $statusExpr,
+              $pathTemplateExpr,
+              $pathParams,
+              $warnings,
+              $request
+            )
           case net.ghoula.eru.Result.Failure(domainError) =>
-            $errorRenderer.render(domainError)
+            ${ renderError[E]('domainError, builder, summonedErrorRenderer) }
         }
+      }
+    }
+  }
+
+  /** The failure branch of a compiled route: an `ErrorRenderer` given in scope (endpoint tier)
+    * wins; otherwise the builder-level renderer active at this route's registration (group/global
+    * tier); the built-in problem-details 500 is the last resort.
+    */
+  private def renderError[E: Type](using
+    q: Quotes
+  )(
+    domainError: Expr[E],
+    builder: Expr[RouterBuilder],
+    summonedErrorRenderer: Option[Expr[net.ghoula.melian.ErrorRenderer[E]]]
+  ): Expr[net.ghoula.eru.Eru[Nothing, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] =
+    summonedErrorRenderer match {
+      case Some(renderer) => '{ $renderer.render($domainError) }
+      case None =>
+        '{
+          $builder.groupErrorRenderer match {
+            case Some(r) if r.isDefinedAt($domainError) => r($domainError)
+            case _ => ProblemDetails.renderDomainFallback($domainError)
+          }
+        }
+    }
+
+  /** Compiles a WebSocket route binding.
+    *
+    * The handler's marked parameters (Path/Query/Header) are extracted from the upgrade request by
+    * the same Girdle machinery as HTTP routes. Its return type must be `WebSocketEndpoint[In, Out]`
+    * -- a function from the typed [[net.ghoula.melian.WebSocketSession]] to
+    * `Eru[WebSocketError | HttpError, Unit]`. The route is registered under `Method.GET`; the RFC
+    * 6455 upgrade itself is performed by eru-http's `WebSocketServer`.
+    *
+    * Inbound messages are decoded strictly via `Decoder[JsonValue, In]` and `Validator[In]`; a
+    * rejected message closes the connection with 1003. Outbound messages are encoded via
+    * `Encoder[Out, JsonValue]`.
+    */
+  def addWebSocketRoute[H: Type](
+    builder: Expr[RouterBuilder],
+    path: Expr[String],
+    handler: Expr[H],
+    wsConfig: Expr[net.ghoula.eru.http.server.WebSocketServerConfig],
+    operationId: Expr[String],
+    summary: Expr[String],
+    description: Expr[String],
+    tags: Expr[String]
+  )(using q: Quotes): Expr[RouterBuilder] = {
+    import q.reflect.*
+
+    val pathStr = path.valueOrAbort
+    val operationIdStr = operationId.value.getOrElse("")
+    val summaryStr = summary.value.getOrElse("")
+    val descriptionStr = description.value.getOrElse("")
+    val tagsVec = tags.value.getOrElse("").split(",").map(_.trim).filter(_.nonEmpty).toVector
+
+    val template = PathTemplate.parse(pathStr) match {
+      case Right(p) => p
+      case Left(e) => report.errorAndAbort(s"Invalid path template: $e")
+    }
+
+    val info = HandlerIntrospection.analyze[H]
+    verifyPathParams("WEBSOCKET", pathStr, template, info)
+    // The upgrade request is a GET: body markers can never be satisfied and would only fail at
+    // runtime with BodyMissing, so reject them where everything else is rejected -- compile time.
+    if info.hasBody then
+      report.errorAndAbort(
+        MacroErrors.formatMethodConstraint(
+          "WEBSOCKET",
+          pathStr,
+          "WebSocket upgrade requests are GETs and cannot carry a body, but the handler declares a body parameter (Json[A], Coded[A], or Form[A]).",
+          "Extract request data from path, query, and header parameters only."
+        )
+      )
+
+    // The return type must be WebSocketEndpoint[In, Out] = WebSocketSession[In, Out] => Eru[...].
+    val (_, returnType) = HandlerIntrospection.decomposeFunction(TypeRepr.of[H].dealias)
+    val (wsFunction, isEndpoint) = returnType.dealias match {
+      case AppliedType(cf, List(_, result)) if cf.typeSymbol.fullName.contains("ContextFunction") =>
+        (result, true)
+      case other => (other, false)
+    }
+    val (sessionTypeRepr, _) = HandlerIntrospection.decomposeFunction(wsFunction)
+    val (inTypeRepr, outTypeRepr) = sessionTypeRepr.headOption match {
+      case Some(AppliedType(base, List(inT, outT))) if base.typeSymbol.name == "WebSocketSession" =>
+        (inT, outT)
+      case other =>
+        report.errorAndAbort(
+          MacroErrors.formatMethodConstraint(
+            "WEBSOCKET",
+            pathStr,
+            s"WebSocket handler must return WebSocketEndpoint[In, Out], got: ${other.map(_.show).getOrElse("?")}.",
+            "Declare the return type as WebSocketEndpoint[ClientMessage, ServerMessage]."
+          )
+        )
+    }
+
+    val paramTypes = TypeRepr.of[H].dealias match {
+      case AppliedType(_, args) => args.init
+      case _ => report.errorAndAbort("Cannot decompose handler type")
+    }
+    val templateParamNames = template.paramNames
+
+    (inTypeRepr.asType, outTypeRepr.asType) match {
+      case ('[in], '[out]) =>
+        val decoderExpr =
+          summonOrAbort[net.ghoula.sarati.codec.Decoder[net.ghoula.sarati.ast.json.JsonValue, in]](
+            "WEBSOCKET",
+            pathStr,
+            "message",
+            s"Decoder[JsonValue, ${Type.show[in]}]"
+          )
+        val validatorExpr =
+          summonOrAbort[net.ghoula.valar.Validator[in]]("WEBSOCKET", pathStr, "message", s"Validator[${Type.show[in]}]")
+        val encoderExpr = summonOrAbort[net.ghoula.sarati.codec.Encoder[out, net.ghoula.sarati.ast.json.JsonValue]](
+          "WEBSOCKET",
+          pathStr,
+          "message",
+          s"Encoder[${Type.show[out]}, JsonValue]"
+        )
+
+        val pathParamNames: Map[Int, String] = {
+          val pathParamIndices =
+            paramTypes.zip(info.params).zipWithIndex.collect {
+              case ((_, p), i) if p.kind == HandlerIntrospection.ParamKind.PathParam => i
+            }
+          pathParamIndices.zip(templateParamNames).toMap
+        }
+
+        val handlerExpr: Expr[HandlerFn] = '{
+          (request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], pathParams: Map[String, String]) =>
+            ${
+              val typedExtractions: List[(Type[?], Expr[MEru[Any]])] =
+                paramTypes.zip(info.params).zipWithIndex.map { case ((tpe, paramInfo), idx) =>
+                  val innerType = HandlerIntrospection.innerTypeOf(using q)(tpe)
+                  innerType.asType match {
+                    case '[a] =>
+                      if isDecodeResultKind(paramInfo.kind) then {
+                        val extraction = mkDecodeBodyExtraction[a](paramInfo, 'request, pathStr, "WEBSOCKET", false)
+                        (Type.of[SaratiBridge.DecodeResult[a]], '{ $extraction: MEru[Any] })
+                      } else {
+                        val extraction =
+                          mkExtraction[a](paramInfo, idx, pathParamNames, 'request, 'pathParams, pathStr, "WEBSOCKET")
+                        (Type.of[a], '{ $extraction: MEru[Any] })
+                      }
+                  }
+                }
+
+              buildChain(
+                typedExtractions,
+                base = { (typedArgs, _) =>
+                  buildWebSocketBase[H, in, out](
+                    typedArgs,
+                    handler,
+                    isEndpoint,
+                    decoderExpr,
+                    validatorExpr,
+                    encoderExpr,
+                    wsConfig,
+                    'request
+                  )
+                },
+                Nil
+              )
+            }
+        }
+
+        val schemaExpr = SchemaGen.operationSchema(
+          pathStr,
+          "GET",
+          info,
+          paramTypes,
+          templateParamNames,
+          responseStatus = 101,
+          responseBodyType = TypeRepr.of[Nothing],
+          isEventStream = false,
+          Option.when(operationIdStr.nonEmpty)(operationIdStr),
+          Vector.empty,
+          Option.when(summaryStr.nonEmpty)(summaryStr),
+          Option.when(descriptionStr.nonEmpty)(descriptionStr),
+          tagsVec,
+          isWebSocket = true
+        )
+
+        '{
+          $builder.addEntry(
+            RouteEntry(
+              pathTemplate = ${ Expr(pathStr) },
+              method = net.ghoula.eru.http.Method.GET,
+              handler = $handlerExpr,
+              schema = $schemaExpr
+            )
+          )
+        }
+
+      case _ => report.errorAndAbort("Failed to extract WebSocket message types")
+    }
+  }
+
+  /** The base case of a WebSocket route's extraction chain: wraps the extracted arguments into the
+    * typed session function and performs the upgrade dispatch.
+    */
+  private def buildWebSocketBase[H: Type, In: Type, Out: Type](using
+    q: Quotes
+  )(
+    typedArgs: List[Expr[Any]],
+    handler: Expr[H],
+    isEndpoint: Boolean,
+    decoderExpr: Expr[net.ghoula.sarati.codec.Decoder[net.ghoula.sarati.ast.json.JsonValue, In]],
+    validatorExpr: Expr[net.ghoula.valar.Validator[In]],
+    encoderExpr: Expr[net.ghoula.sarati.codec.Encoder[Out, net.ghoula.sarati.ast.json.JsonValue]],
+    wsConfig: Expr[net.ghoula.eru.http.server.WebSocketServerConfig],
+    request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]]
+  ): Expr[MEru[net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]]] = {
+    import q.reflect.*
+
+    val typedCall = Apply(
+      Select.unique(handler.asTerm, "apply"),
+      typedArgs.map(_.asTerm)
+    )
+    val endpointExpr: Expr[net.ghoula.melian.WebSocketEndpoint[In, Out]] =
+      if isEndpoint then
+        // (params) => RequestContext ?=> WebSocketSession => Eru — apply the context function with
+        // a fresh RequestContext built from the upgrade request.
+        '{
+          val ctx: net.ghoula.melian.RequestContext = LiveRequestContext.from($request)
+          ${ typedCall.asExprOf[net.ghoula.melian.RequestContext ?=> net.ghoula.melian.WebSocketEndpoint[In, Out]] }(
+            using ctx
+          )
+        }
+      else typedCall.asExprOf[net.ghoula.melian.WebSocketEndpoint[In, Out]]
+
+    '{
+      val wsHandler: net.ghoula.eru.http.server.WebSocketHandler = {
+        (conn: net.ghoula.eru.http.server.ServerWebSocketConnection) =>
+          val session = new net.ghoula.melian.WebSocketSession[In, Out](
+            WebSocketRoutes.transportFor(conn),
+            (message: net.ghoula.eru.http.websocket.WebSocketMessage) =>
+              ${ webSocketDecode[In]('message, decoderExpr, validatorExpr) },
+            (out: Out) =>
+              net.ghoula.sarati.ast.json.formatJson($encoderExpr.encode(out), net.ghoula.sarati.ast.json.compactFormat)
+          )
+          $endpointExpr(session)
+      }
+      WebSocketRoutes.dispatch($request, $wsConfig)(wsHandler)
+    }
+  }
+
+  /** The strict inbound message pipeline: Rumil parse -> Sarati decode -> Valar validate. Any
+    * failure becomes a rejection detail (the session closes with 1003).
+    */
+  private def webSocketDecode[In: Type](using
+    q: Quotes
+  )(
+    message: Expr[net.ghoula.eru.http.websocket.WebSocketMessage],
+    decoderExpr: Expr[net.ghoula.sarati.codec.Decoder[net.ghoula.sarati.ast.json.JsonValue, In]],
+    validatorExpr: Expr[net.ghoula.valar.Validator[In]]
+  ): Expr[Either[String, In]] = {
+    import parser.core.Result as RumilResult
+    '{
+      val text: String = $message match {
+        case net.ghoula.eru.http.websocket.WebSocketMessage.Text(value) => value
+        case net.ghoula.eru.http.websocket.WebSocketMessage.Binary(bytes) =>
+          bytes.asString(net.ghoula.eru.http.Charset.UTF8)
+      }
+      parsers.json.parseJson(text) match {
+        case RumilResult.Success(json, _) =>
+          $decoderExpr.decode(json) match {
+            case net.ghoula.sarati.Result.Success(value, _) =>
+              $validatorExpr.validate(value) match {
+                case net.ghoula.valar.ValidationResult.Valid(validated) => Right(validated)
+                case net.ghoula.valar.ValidationResult.Invalid(errors) =>
+                  Left(
+                    "validation failed: " + errors
+                      .map(e => s"${e.fieldPath.mkString(".")}: ${e.message}")
+                      .mkString("; ")
+                  )
+              }
+            case net.ghoula.sarati.Result.Partial(_, errors, _) =>
+              Left("decode failed: " + errors.map(_.toString).mkString("; "))
+            case net.ghoula.sarati.Result.Failure(errors, _) =>
+              Left("decode failed: " + errors.map(_.toString).mkString("; "))
+          }
+        case RumilResult.Partial(_, errors, _) =>
+          Left("parse failed: " + errors.map(_.toString).mkString("; "))
+        case RumilResult.Failure(errors, _) =>
+          Left("parse failed: " + errors.map(_.toString).mkString("; "))
       }
     }
   }
@@ -434,11 +808,9 @@ object RouteMacros {
           report.errorAndAbort("Query parameter missing name; use Query[\"name\", Type]")
         )
         mkQueryExtraction[A](name, request, pathStr, method)
-      case HandlerIntrospection.ParamKind.CodedBody =>
-        mkCodedBodyExtraction[A](request, pathStr, method)
-      case HandlerIntrospection.ParamKind.FormBody =>
-        mkFormBodyExtraction[A](request, pathStr, method)
       case other =>
+        // Body markers never reach here: the route macros dispatch them through
+        // mkDecodeBodyExtraction, which carries decode warnings.
         report.errorAndAbort(s"Unsupported parameter kind: $other")
     }
   }
@@ -508,7 +880,8 @@ object RouteMacros {
   )(
     request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
     pathStr: String,
-    method: String
+    method: String,
+    strict: Boolean
   ): Expr[MEru[SaratiBridge.DecodeResult[A]]] = {
     val jsonDec = summonOrAbort[net.ghoula.sarati.codec.Decoder[net.ghoula.sarati.ast.json.JsonValue, A]](
       method,
@@ -527,7 +900,7 @@ object RouteMacros {
           }
           .flatMap { _ =>
             SaratiBridge
-              .decodeJsonBody[A]($request.body)(using $jsonDec)
+              .decodeJsonBody[A]($request.body, ${ Expr(strict) })(using $jsonDec)
               .mapError { err =>
                 net.ghoula.melian.RequestError.DecodeFailed(List(err.message)): ErrType
               }
@@ -554,12 +927,14 @@ object RouteMacros {
   )(
     request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
     pathStr: String,
-    method: String
-  ): Expr[MEru[A]] = {
+    method: String,
+    strict: Boolean
+  ): Expr[MEru[SaratiBridge.DecodeResult[A]]] = {
     val coded = summonCodedDecoder[A](method, pathStr)
     val validator = summonOrAbort[net.ghoula.valar.Validator[A]](method, pathStr, "body", s"Validator[${Type.show[A]}]")
     '{
-      net.ghoula.melian.router.CodedBody.decode[A]($request.headers, $request.body)(using $coded, $validator)
+      net.ghoula.melian.router.CodedBody
+        .decode[A]($request.headers, $request.body, ${ Expr(strict) })(using $coded, $validator)
     }
   }
 
@@ -600,7 +975,7 @@ object RouteMacros {
     request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
     pathStr: String,
     method: String
-  ): Expr[MEru[A]] = {
+  ): Expr[MEru[SaratiBridge.DecodeResult[A]]] = {
     val formDecoder = summonOrAbort[net.ghoula.melian.extraction.FormDecoder[A]](
       method,
       pathStr,
@@ -671,11 +1046,12 @@ object RouteMacros {
   // --- Response encoding ---
 
   private def encodeEventStream[R](
-    response: R
+    response: R,
+    warnings: List[String]
   ): net.ghoula.eru.Eru[ErrType, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
     import net.ghoula.eru.Eru
     import net.ghoula.eru.http.*
-    (response: Any) match {
+    val sse: Eru[ErrType, Response[Body]] = (response: Any) match {
       case es: net.ghoula.melian.EventStream[ChunkStream @unchecked] =>
         Response.sse(es.source).mapError { err =>
           HttpError.InvalidResponse(InvalidResponse(err.toString, "SSE headers")): ErrType
@@ -683,22 +1059,61 @@ object RouteMacros {
       case other =>
         Eru.fail(HttpError.ProtocolError(s"Expected EventStream, got: ${other.getClass.getName}", "response"): ErrType)
     }
+    sse.flatMap(attachWarnings(_, warnings))
   }
 
+  /** Encodes the handler's response wrapper into an eru-http Response, then attaches the
+    * `X-Melian-Warnings` header when the Girdle produced decode warnings.
+    */
   private def encodeResponse[R, B](
     response: R,
     encoder: Option[net.ghoula.eru.http.BodyEncoder[B]],
+    negotiator: Option[ResponseNegotiator[B]],
+    customStatusCode: Int,
     pathTemplate: String,
-    pathParams: Map[String, String]
+    pathParams: Map[String, String],
+    warnings: List[String],
+    request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]
   ): net.ghoula.eru.Eru[ErrType, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
     import net.ghoula.eru.Eru
     import net.ghoula.eru.http.*
-    (response: Any) match {
+
+    // The Accept header is only read on negotiating routes.
+    val acceptHeader: Option[String] =
+      if negotiator.isDefined then request.headers.getFirst(HeaderNames.Accept).map(_.value) else None
+
+    // Encodes a wrapper body: through the negotiator when the route negotiates, otherwise through
+    // the BodyEncoder given. The negotiated media type becomes the Content-Type header, mirroring
+    // withEncodedBody's behavior on the plain path.
+    def encodeBody(body: B): Eru[ErrType, Body] = negotiator match {
+      case Some(n) => n.encode(body, acceptHeader)
+      case None =>
+        encoder.get.encode(body).mapError { err =>
+          HttpError.BodyEncodeError(err): ErrType
+        }
+    }
+
+    def withContentType(response: Response[Body], body: Body): Eru[ErrType, Response[Body]] =
+      body.mediaType match {
+        case Some(mt) =>
+          response.withContentType(mt).mapError {
+            case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
+              HttpError.InvalidResponse(InvalidResponse(err.toString, "Content-Type header")): ErrType
+          }
+        case None => Eru.succeed(response)
+      }
+
+    val encoded: Eru[ErrType, Response[Body]] = (response: Any) match {
       case ok: net.ghoula.melian.Ok[B @unchecked] =>
-        Response.ok(Body.Empty).withEncodedBody(ok.body)(using encoder.get).mapError {
-          case err: EncodeError => HttpError.BodyEncodeError(err): ErrType
-          case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
-            HttpError.InvalidResponse(InvalidResponse(err.toString, "Content-Type header")): ErrType
+        negotiator match {
+          case Some(_) =>
+            encodeBody(ok.body).flatMap(body => withContentType(Response(StatusCode.Ok, Headers.empty, body), body))
+          case None =>
+            Response.ok(Body.Empty).withEncodedBody(ok.body)(using encoder.get).mapError {
+              case err: EncodeError => HttpError.BodyEncodeError(err): ErrType
+              case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
+                HttpError.InvalidResponse(InvalidResponse(err.toString, "Content-Type header")): ErrType
+            }
         }
       case _: net.ghoula.melian.NoContent.type =>
         Eru.succeed(Response.noContent)
@@ -707,31 +1122,62 @@ object RouteMacros {
           case Some(uri) => uri.path
           case None => deriveLocation(pathTemplate, pathParams)
         }
-        encoder.get
-          .encode(created.body)
-          .mapError { err =>
-            HttpError.BodyEncodeError(err): ErrType
-          }
-          .flatMap { body =>
-            Uri
-              .parse(locationPath)
-              .mapError { err =>
-                HttpError.InvalidUri(err): ErrType
-              }
-              .flatMap { uri =>
-                Response.created(uri, body).mapError { err =>
-                  HttpError.InvalidResponse(InvalidResponse(err.toString, "Location header")): ErrType
+        encodeBody(created.body).flatMap { body =>
+          Uri
+            .parse(locationPath)
+            .mapError { err =>
+              HttpError.InvalidUri(err): ErrType
+            }
+            .flatMap { uri =>
+              withContentType(Response(StatusCode.Created, Headers.empty, body), body)
+                .flatMap(_.withLocation(uri))
+                .mapError {
+                  case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
+                    HttpError.InvalidResponse(InvalidResponse(err.toString, "Location header")): ErrType
+                  case err: ErrType => err
                 }
-              }
-          }
+            }
+        }
       case accepted: net.ghoula.melian.Accepted[B @unchecked] =>
-        Response(StatusCode.Accepted, Headers.empty, Body.Empty)
-          .withEncodedBody(accepted.body)(using encoder.get)
-          .mapError {
-            case err: EncodeError => HttpError.BodyEncodeError(err): ErrType
-            case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
-              HttpError.InvalidResponse(InvalidResponse(err.toString, "Content-Type header")): ErrType
-          }
+        negotiator match {
+          case Some(_) =>
+            encodeBody(accepted.body).flatMap(body =>
+              withContentType(Response(StatusCode.Accepted, Headers.empty, body), body)
+            )
+          case None =>
+            Response(StatusCode.Accepted, Headers.empty, Body.Empty)
+              .withEncodedBody(accepted.body)(using encoder.get)
+              .mapError {
+                case err: EncodeError => HttpError.BodyEncodeError(err): ErrType
+                case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
+                  HttpError.InvalidResponse(InvalidResponse(err.toString, "Content-Type header")): ErrType
+              }
+        }
+      case unauth: net.ghoula.melian.Unauthorized[B @unchecked] =>
+        encodeBody(unauth.body).flatMap { body =>
+          withContentType(Response(StatusCode.Unauthorized, Headers.empty, body), body)
+            .flatMap(_.setHeader(HeaderNames.WWWAuthenticate, unauth.challenge))
+            .mapError {
+              case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
+                HttpError.InvalidResponse(InvalidResponse(err.toString, "WWW-Authenticate header")): ErrType
+              case err: ErrType => err
+            }
+        }
+      case tooMany: net.ghoula.melian.TooManyRequests[B @unchecked] =>
+        encodeBody(tooMany.body).flatMap { body =>
+          withContentType(Response(StatusCode.TooManyRequests, Headers.empty, body), body)
+            .flatMap(_.setHeader(HeaderNames.RetryAfter, retryAfterSeconds(tooMany.retryAfter)))
+            .mapError {
+              case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
+                HttpError.InvalidResponse(InvalidResponse(err.toString, "Retry-After header")): ErrType
+              case err: ErrType => err
+            }
+        }
+      case custom: net.ghoula.melian.Status[Int @unchecked, B @unchecked] =>
+        // The code is validated at compile time (SchemaGen.responseStatusCode); the runtime
+        // conversion cannot fail.
+        val status: StatusCode = StatusCode(customStatusCode).unsafeRunSync()
+        encodeBody(custom.body).flatMap(body => withContentType(Response(status, Headers.empty, body), body))
       case seeOther: net.ghoula.melian.SeeOther =>
         Response(StatusCode.SeeOther, Headers.empty, Body.Empty)
           .withLocation(seeOther.location)
@@ -743,6 +1189,33 @@ object RouteMacros {
       case _ =>
         Eru.succeed(Response(StatusCode.Ok, Headers.empty, Body.text(response.toString)))
     }
+
+    encoded.flatMap(attachWarnings(_, warnings))
+  }
+
+  /** Attaches the warnings header; absent when there are no warnings (the clean common path). */
+  private def attachWarnings(
+    response: net.ghoula.eru.http.Response[net.ghoula.eru.http.Body],
+    warnings: List[String]
+  ): net.ghoula.eru.Eru[ErrType, net.ghoula.eru.http.Response[net.ghoula.eru.http.Body]] = {
+    import net.ghoula.eru.Eru
+    import net.ghoula.eru.http.*
+    if warnings.isEmpty then Eru.succeed(response)
+    else {
+      val count = warnings.size
+      val value = s"$count decode warning${if count == 1 then "" else "s"}"
+      response
+        .setHeader(MelianHeaders.Warnings, value)
+        .mapError { case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
+          HttpError.InvalidResponse(InvalidResponse(err.toString, s"${MelianHeaders.Warnings} header")): ErrType
+        }
+    }
+  }
+
+  /** Retry-After carries delta-seconds; non-finite durations clamp to zero. */
+  private def retryAfterSeconds(retryAfter: scala.concurrent.duration.Duration): String = {
+    val seconds = if retryAfter.isFinite then retryAfter.toSeconds else 0L
+    seconds.max(0L).toString
   }
 
   private def deriveLocation(pathTemplate: String, pathParams: Map[String, String]): String =

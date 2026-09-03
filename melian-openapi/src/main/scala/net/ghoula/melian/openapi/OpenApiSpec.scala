@@ -57,6 +57,10 @@ object OpenApiSpec {
   private def buildOperation(op: OperationSchema, components: ComponentRegistry): JsonValue = {
     val fields = scala.collection.mutable.Map[String, JsonValue]()
 
+    fields("operationId") = JsonValue.Str(
+      op.operationId.getOrElse(deriveOperationId(op.method, op.pathTemplate))
+    )
+    if op.isWebSocket then fields("x-websocket") = JsonValue.Bool(true)
     op.summary.foreach(s => fields("summary") = JsonValue.Str(s))
     op.description.foreach(d => fields("description") = JsonValue.Str(d))
     if op.tags.nonEmpty then fields("tags") = JsonValue.Array(op.tags.toList.map(JsonValue.Str(_)))
@@ -72,6 +76,27 @@ object OpenApiSpec {
     fields("responses") = buildResponses(op, components)
 
     JsonValue.Object(fields.toMap)
+  }
+
+  /** Derives a stable `operationId` from the method and path template when none was given
+    * explicitly: `GET /workspaces/:workspaceId` becomes `getWorkspacesByWorkspaceId`. Literal
+    * segments PascalCase; parameter segments contribute `By<Name>`. Non-alphanumeric characters are
+    * dropped, so the result is always a valid identifier and stable across builds.
+    */
+  private def deriveOperationId(method: String, pathTemplate: String): String = {
+    def pascal(s: String): String = {
+      val clean = s.filter(_.isLetterOrDigit)
+      if clean.isEmpty then "" else clean.head.toUpper.toString + clean.tail
+    }
+    val pathPart = pathTemplate
+      .split("/")
+      .filter(_.nonEmpty)
+      .map {
+        case s if s.startsWith(":") => "By" + pascal(s.drop(1))
+        case s => pascal(s)
+      }
+      .mkString
+    method.toLowerCase + pathPart
   }
 
   private def buildParameter(param: ParameterSchema): JsonValue = {
@@ -110,19 +135,24 @@ object OpenApiSpec {
   }
 
   private def buildSuccessResponse(op: OperationSchema, components: ComponentRegistry): JsonValue = {
+    // Routes that negotiate (declared Header[Accept]) record their offered media types on the
+    // schema; anything else serves application/json.
+    val responseMediaTypes =
+      if op.responseMediaTypes.nonEmpty then op.responseMediaTypes else Vector("application/json")
+
     val responseObj = op.responseBody match {
       case Some(schema) if !op.isEventStream =>
         JsonValue.Object(
           Map(
             "description" -> JsonValue.Str("Success"),
             "content" -> JsonValue.Object(
-              Map(
-                "application/json" -> JsonValue.Object(
+              responseMediaTypes.map { mt =>
+                mt -> JsonValue.Object(
                   Map(
                     "schema" -> schemaToJson(schema, components)
                   )
                 )
-              )
+              }.toMap
             )
           )
         )

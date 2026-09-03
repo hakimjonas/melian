@@ -115,12 +115,16 @@ Note what is absent: no `Request` object to destructure, no manual parsing, no s
 Transparent type aliases instruct the compile-time extractor where to source each parameter:
 
 ```scala
-opaque type Path[A]    = A   // Extracted from URI path segments
-opaque type Query[A]   = A   // Extracted from URI query parameters
-opaque type Header[A]  = A   // Extracted from HTTP headers
-opaque type Json[A]    = A   // Body: Rumil parse -> Sarati decode -> Valar validate
-opaque type Form[A]    = A   // Body: form-urlencoded extraction -> Valar validate
+type Path[A]    = A   // Extracted from URI path segments
+type Query[N, A] = A  // Extracted from URI query parameters, named by the N literal
+type Header[A]  = A   // Extracted from HTTP headers
+type Json[A]    = A   // Body: Rumil parse -> Sarati decode -> Valar validate (JSON only)
+type Coded[A]   = A   // Body: Content-Type dispatch across JSON, XML, YAML
+type Form[A]    = A   // Body: form-urlencoded extraction -> Valar validate
 ```
+
+Bodies parse resiliently by default; `Strict[Json[A]]` (or `Strict[Coded[A]]`) opts out -- see
+Section 5, Stage 4.
 
 At runtime these are zero-cost (erased to `A`). At compile time the macro inspects parameter types via `TypeRepr` to determine the extraction strategy.
 
@@ -142,8 +146,12 @@ type NotModified    // 304 - no body allowed
 // Streaming
 type EventStream[A] // 200 - SSE stream, typed events encoded via Encoder[A, JsonValue]
 
-// Custom status via phantom type (planned)
-// type Status[Code <: Int & Singleton, A]
+// 4xx / 429 with protocol-required data on the wrapper itself
+type Unauthorized[A]     // 401 - challenge becomes WWW-Authenticate, body encoded like Ok
+type TooManyRequests[A]  // 429 - retryAfter becomes Retry-After (delta-seconds)
+
+// Any other status with a body, via a phantom literal
+type Status[Code <: Int & Singleton, A]  // e.g. Status[203, Report]
 ```
 
 The compiler maps each response type to its eru-http `StatusCode` and enforces `allowsResponseBody` and `requiredHeaders` constraints. For example:
@@ -332,17 +340,23 @@ String -> Result[ParseError, JsonValue]   (or XmlNode, TomlDocument, YamlDocumen
 
 Rumil produces Sarati's AST types directly (they share types -- e.g., `net.ghoula.sarati.ast.json.JsonValue`). Parse errors carry line, column, and offset information via Rumil's `Location` type.
 
-**Resilient parsing mode** (planned). The current pipeline uses strict `parseJson`; the design below describes a default resilient mode via Rumil's `recover` combinator at structural boundaries (object members, array elements). When the parser encounters a syntax error, it records the error, skips to the next recoverable point, and continues. This produces `Result.Partial(value, errors, consumed)` -- a best-effort AST *and* all syntax errors in one pass. Subsequent Sarati and Valar stages process the partial AST and add their own errors, so a single malformed request returns comprehensive feedback across all three pipeline stages.
+**Resilient parsing mode** (implemented). JSON body parsing is resilient by default: a syntax error is recovered at structural boundaries (object members, array elements), producing `Result.Partial(value, errors, consumed)` -- a best-effort AST *and* the syntax errors in one pass. Subsequent Sarati and Valar stages process the partial AST and add their own errors, so a single malformed request returns comprehensive feedback across all three pipeline stages. Recovered errors surface as decode warnings (`RequestContext.warnings` for Endpoint handlers, `X-Melian-Warnings` on the response).
 
-For endpoints that require strict parsing (reject on any syntax error), developers can opt in (planned):
+For endpoints that require strict parsing (reject on any error), wrap the marker in `Strict`:
 
 ```scala
 def importData(
-  data: Json[ImportPayload, Strict]  // strict mode: no recovery, fail on first error
+  data: Strict[Json[ImportPayload]]  // strict mode: no recovery, fail on first error
 ): Endpoint[ImportError, Ok[ImportResult]] = { ... }
 ```
 
-**Lossless parsing mode** (planned). For advanced use cases (custom DSL endpoints, interactive editors, live validation), Rumil can produce a `GreenNode` lossless syntax tree instead of an AST value. GreenNode preserves all source text including whitespace, comments, and error regions (`TokenKind.Error`). The `RedTree` wrapper provides position-aware navigation (`nodeAt(offset)`, parent/sibling traversal, `validate` to collect all errors). This enables applications like:
+The wrapper is a transparent alias (`type Strict[Body] = Body`), so the handler's parameter type
+stays the decoded type itself and the marker exists only for the compile-time extractor. The
+original design sketched a two-argument `Json[A, Strict]`; Scala 3 has no default type arguments for
+type aliases, so that spelling would have forced `Json[A, Resilient]` onto every existing route (or
+a value-level cast to satisfy a marker conjunct). The wrapping alias costs neither.
+
+**Lossless parsing mode** (planned; blocked on an upstream Rumil increment -- the lossless machinery (`GreenNodeOf`, `RedTree`, `IncrementalParser`) ships in `rumil-core`, but the published JSON parser does not yet expose a lossless entry point). For advanced use cases (custom DSL endpoints, interactive editors, live validation), Rumil can produce a `GreenNode` lossless syntax tree instead of an AST value. GreenNode preserves all source text including whitespace, comments, and error regions (`TokenKind.Error`). The `RedTree` wrapper provides position-aware navigation (`nodeAt(offset)`, parent/sibling traversal, `validate` to collect all errors). This enables applications like:
 
 - Live parsing feedback via SSE or WebSocket (parse as the user types, push errors back)
 - Incremental re-parsing (only reparse the edited subtree via `findReparseRegion`)
@@ -421,47 +435,49 @@ The response construction uses eru-http's protocol-correct factory methods direc
 - `NoContent` -> `Response.noContent` which sets status 204 with no body
 - `Ok[A]` -> `Response.ok(body)` with Content-Type from the encoder
 
-For status codes with `requiredHeaders` (401 -> WWW-Authenticate, 405 -> Allow, 429 -> Retry-After), the response type must carry the required data. The following wrapper types are planned:
+For status codes with `requiredHeaders` (401 -> WWW-Authenticate, 405 -> Allow, 429 -> Retry-After), the response type must carry the required data. The wrappers:
 
 ```scala
-// 401 - the challenge string is part of the response type
-// type Unauthorized(challenge: String)
-
+Unauthorized("Bearer realm=\"api\"", body)      // 401 - challenge becomes WWW-Authenticate
+TooManyRequests(90.seconds, body)               // 429 - duration becomes Retry-After
 // 405 - the allowed methods are derived from the router (all methods registered for the path)
 // This is automatic -- the router knows which methods are bound
-
-// 429 - rate limiting metadata
-// type TooManyRequests(retryAfter: Duration)
 ```
+
+Any other body-carrying status is served by the phantom-typed `Status[Code, A]`, whose literal code
+the macro validates at compile time: the code must be in 100-599, must allow a response body, and
+must not require headers (statuses with mandatory headers have the dedicated wrappers above, and 405
+is router-derived).
 
 ### Error Rendering
 
-Planned: a three-tier precedence model. The current implementation resolves a single global `ErrorRenderer[E]` given, with `ErrorRenderer[Nothing]` covering infallible handlers.
+Implemented as a three-tier precedence model.
 
 ```scala
-// 1. Global default (RFC 9457 Problem Details)
+// 1. Endpoint tier: an ErrorRenderer[E] given in scope at the route's registration site wins.
+given ErrorRenderer[DomainError] with {
+  def render(error: DomainError): Eru[Nothing, Response[Body]] = error match {
+    case DomainError.NotFound(id) => Eru.succeed(Response(StatusCode.NotFound, Headers.empty, Body.text(s"Resource $id not found")))
+    case DomainError.Conflict(msg) => Eru.succeed(Response(StatusCode.Conflict, Headers.empty, Body.text(msg)))
+  }
+}
+
+// 2. Group/global tier: the builder-level renderer active where the route is registered. It is a
+//    PartialFunction over the (type-erased) error; errors it does not claim fall through to tier 3.
 val app = Router.builder
-  .errorRenderer(ProblemDetailsRenderer)   // global default
+  .errorRenderer { case e: DomainError.NotFound => renderNotFound(e) }  // tier for later routes
   .get("/workspaces/:id", getWorkspace)
   .build
 
-// 2. Per-group override
-val admin = Router.builder
-  .prefix("/admin")
-  .errorRenderer(AdminErrorRenderer)       // overrides global for /admin/*
-  .get("/users", listUsers)
-  .build
-
-// 3. Per-endpoint (via the Endpoint's error type)
-given ErrorRenderer[DomainError] with {
-  def render(error: DomainError): Eru[Nothing, Response[Body]] = error match {
-    case DomainError.NotFound(id) => Eru.succeed(Response.notFound(Body.text(s"Resource $id not found")))
-    case DomainError.Conflict(msg) => Eru.succeed(Response.conflict(Body.text(msg)))
-  }
-}
+// 3. Built-in fallback: RFC 9457 problem+json 500 without any error detail. Always available.
 ```
 
-Precedence: endpoint-level given > group-level > global. Innermost wins.
+Precedence: endpoint-level given > builder-level renderer > built-in problem details. The
+`errorRenderer` call is a cursor on the builder: it applies to routes registered after it, so a
+renderer set before a section of routes acts as that group's tier, and one set before everything
+acts as the global tier.
+
+`ErrorRenderer[Nothing]` still covers infallible handlers (their error channel is uninhabited).
 
 The default `ProblemDetailsRenderer` produces RFC 9457 JSON:
 
@@ -576,20 +592,34 @@ SSE endpoints enable any push-based pattern: live notifications, progress tracki
 
 ### WebSocket Endpoints
 
-**Planned, not yet implemented.**
-
-eru-http provides full RFC 6455 WebSocket support with `WebSocketHandshake`, `WebSocketFrame`, `WebSocketMessage`, and `WebSocketHandler`. Melian provides typed WebSocket endpoints:
+Implemented on top of eru-http's RFC 6455 support (`WebSocketHandshake`, `WebSocketFrame`,
+`WebSocketMessage`, `WebSocketHandler`):
 
 ```scala
 def liveSession(
   sessionId: Path[UUID],
   auth:      Header[Authorization]
 ): WebSocketEndpoint[ClientMessage, ServerMessage] = {
-  conn => sessionService.handleConnection(sessionId, conn)
+  session => sessionService.handleConnection(sessionId, session)
 }
+
+Router.builder.websocket("/live/:sessionId", liveSession).build
 ```
 
-The framework handles the HTTP upgrade handshake and frame protocol via eru-http. The developer works with typed messages -- `ClientMessage` decoded from incoming frames via Sarati, `ServerMessage` encoded to outgoing frames.
+`WebSocketEndpoint[In, Out]` is a function from the typed session to
+`Eru[WebSocketError | HttpError, Unit]`. `WebSocketSession[In, Out]` exposes `receive` (decodes the
+next inbound message via `Decoder[JsonValue, In]` and `Validator[In]`), `send` (encodes via
+`Encoder[Out, JsonValue]` to a text frame), `close`, `isOpen`, `subprotocol`, and `upgradeRequest`.
+
+Dispatch: WebSocket routes register under `GET` -- the upgrade request is a GET. When the matched
+request carries a valid upgrade, the route's marked parameters are extracted by the same Girdle
+machinery (a failed extraction answers 400 problem+json before the upgrade), then the RFC 6455
+handshake is performed by eru-http. A plain GET to a WebSocket path answers 426 Upgrade Required.
+
+Inbound messages are decoded strictly: a message that fails parsing, decoding, or validation closes
+the connection with 1003 (Unsupported Data) and fails `receive` with a
+`WebSocketError.ProtocolViolation` carrying the detail, so a malformed peer cannot feed garbage into
+business logic unbounded.
 
 WebSocket endpoints support bidirectional, low-latency communication for interactive applications: collaborative editing, live dashboards, streaming queries, or any use case where request-response is insufficient.
 
@@ -621,11 +651,9 @@ def createWorkspace(...): Endpoint[DomainError, Created[Workspace]] = {
 
 ### 10.2 Content Negotiation
 
-**Decision: JSON by default, opt-in multi-format via overloaded encoders.**
+**Decision: JSON by default, opt-in multi-format via a declared `Header[Accept]`.**
 
-The `Header[Accept]` q-value dispatch described below is **Planned, not yet implemented**. What is implemented: a `Coded[A]` request body dispatches on `Content-Type` across JSON, XML, and YAML.
-
-The vast majority of API endpoints serve JSON. Making content negotiation the default adds complexity without benefit for most users. The design:
+Implemented. A `Coded[A]` request body dispatches on `Content-Type` across JSON, XML, and YAML; response-side negotiation engages when a handler declares an `Accept` header parameter.
 
 - **Default**: All endpoints encode responses as `application/json` via `Encoder[A, JsonValue]`
 - **Opt-in**: Endpoints that need multiple formats declare it via an `Accept` header parameter:
@@ -637,7 +665,19 @@ def getWorkspace(
 ): Endpoint[DomainError, Ok[Workspace]] = { ... }
 ```
 
-When `Header[Accept]` is present, the macro looks for `Encoder[A, JsonValue]`, `Encoder[A, XmlNode]`, etc. and generates a runtime `MediaType.matches` dispatch based on the Accept header quality values. eru-http already provides `parseAcceptEncoding` with q-value sorting that can be adapted for content types.
+When `Header[Accept]` is present on a body-carrying route, the macro builds a `ResponseNegotiator`
+from the encoders that exist for the body type: `Encoder[A, JsonValue]` is the baseline (required),
+`Encoder[A, XmlNode]` and `Encoder[A, YamlValue]` are opt-in. At runtime the request's Accept header
+is ranked per RFC 9110: entries with `q=0` are unacceptable (Section 12.5.1); the rest are ranked by
+q-value, ties break by range specificity (Section 12.5.2 -- an exact `type/subtype` beats `type/*`,
+which beats `*/*`), and the server's preference order (JSON, XML, YAML) decides only after that; a
+missing header defaults to JSON. A header matching none of the offered types answers 406 Not
+Acceptable as an RFC 9457 problem+json via the Girdle's `RequestError.NotAcceptable`. The negotiated
+media type becomes the response's Content-Type.
+
+Because the offered types are derived from encoder existence, the OpenAPI response documents exactly
+the media types the endpoint can produce (see Section 6 of the OpenAPI module: multi-content
+responses).
 
 If no `Header[Accept]` parameter is declared, content negotiation is skipped entirely -- zero overhead.
 
@@ -754,24 +794,27 @@ mirror.fromProduct(Tuple.fromArray(fieldValues.toArray))
 
 ```
 melian/
-  melian-core/       Type alias markers (Path, Query, Header, Json, Coded, Form),
-                     response types (Ok, Created, NoContent, EventStream, ...),
-                     Endpoint type alias, RequestContext trait,
+  melian-core/       Type alias markers (Path, Query, Header, Json, Coded, Form, Strict),
+                     response types (Ok, Created, NoContent, SeeOther, NotModified, EventStream,
+                     Unauthorized, TooManyRequests, Status), Endpoint and WebSocketEndpoint types,
+                     WebSocketSession/transport, RequestContext trait,
                      RequestError enum, ErrorRenderer typeclass,
-                     extraction typeclasses (FromPathSegment, FromQueryParam, FromHeader)
+                     extraction typeclasses (FromPathSegment, FromQueryParam, FromHeader, FormDecoder)
 
   melian-router/     Compile-time macro engine: inline Router methods,
                      path parsing, method constraint verification,
                      instance validation, extractor code generation,
-                     response encoder generation, OpenAPI metadata extraction
+                     response encoder generation (with content negotiation),
+                     WebSocket upgrade dispatch, OpenAPI metadata extraction
 
   melian-openapi/    OpenAPI 3.1 spec materialization from compile-time metadata,
                      JSON Schema generation via Mirror traversal,
                      annotation support (@description, @example),
-                     Swagger UI serving endpoint
+                     operationId emission, Swagger UI serving endpoint
 
-  melian-server/     MelianServer entry point (serve / serveWith),
-                     middleware: StaticFiles, SecurityHeaders, ErrorPages, Health
+  melian-server/     MelianServer entry points (serve / serveWith / start with drain),
+                     middleware: StaticFiles, SecurityHeaders, ErrorPages, Health,
+                     Csrf, Session, RateLimit
 
   melian-test/       MelianTestKit for calling endpoints directly without
                      a running server, request construction and response inspection
@@ -783,7 +826,7 @@ melian/
 melian-core  (depends on: eru-http-core)
      |
      v
-melian-router  (depends on: melian-core, rumil-parsers, sarati, valar-core)
+melian-router  (depends on: melian-core, rumil-parsers, sarati, valar-core, eru-http-server)
      |
      +---> melian-openapi  (depends on: melian-core, sarati)
      |
@@ -802,7 +845,7 @@ melian-router  (depends on: melian-core, rumil-parsers, sarati, valar-core)
 
 Melian is the ergonomic way to use eru-http. Beyond the core Girdle (extraction, validation, encoding), a real web project needs infrastructure that isn't strictly HTTP but that every production deployment requires. Melian provides these as composable helpers that produce eru-http's canonical types and never wrap or replace them.
 
-Status of the subsections below: static files and health/readiness are implemented. CORS, request logging, request IDs, authentication, error handling, compression, and body limits are provided by `eru-http`'s `Middleware`; the fluent builder API sketched below is descoped (see Section 13). CSRF, session management, rate limiting, and a graceful-shutdown wrapper are planned as `melian-server` middleware. ACME is planned upstream in `eru-http` (TLS is that library's domain).
+Status of the subsections below: static files, health/readiness, CSRF protection, session management, rate limiting, and the graceful-shutdown wrapper are implemented as `melian-server` middleware. CORS, request logging, request IDs, authentication, error handling, compression, and body limits are provided by `eru-http`'s `Middleware`; the fluent builder API sketched in the section bodies is descoped (see Section 13) -- compose these middlewares through `MelianServer.serveWith` instead. ACME remains planned upstream in `eru-http` (TLS is that library's domain).
 
 ### 14.1 Let's Encrypt / ACME Provisioning
 
@@ -901,94 +944,103 @@ Produces eru-http handler for matching paths. Sets `Content-Type` from file exte
 
 ### 14.6 CSRF Protection
 
-**Planned, not yet implemented.**
-
-Cross-site request forgery protection for state-changing endpoints:
+Implemented as `Csrf` in `melian-server` (double-submit cookie pattern):
 
 ```scala
-val app = Router.builder
-  .csrf(CsrfConfig(
-    tokenHeader = "X-CSRF-Token",
-    cookieName = "__csrf",
-    secureCookie = true,
-  ))
-  .post("/api/users", createUser)
-  .build
+val app = Csrf.middleware(Csrf.Config(
+  cookieName = "__csrf",
+  headerName = "X-CSRF-Token",
+  secureCookie = true,
+  sameSite = SameSite.Strict,
+))(router.toHandler)
 ```
 
-Generates tokens, sets cookies, validates on state-changing methods (POST, PUT, DELETE, PATCH). Skips for safe methods (GET, HEAD, OPTIONS). Returns 403 on mismatch.
+Safe requests (GET, HEAD, OPTIONS, TRACE, QUERY) pass through; when the browser has no CSRF cookie
+yet, a cryptographically random token is issued via `Set-Cookie` (Secure, HttpOnly, SameSite).
+State-changing requests must present the same token in the cookie and the header; anything else
+answers 403 Forbidden. The comparison is constant-time.
 
 ### 14.7 Session Management
 
-**Planned, not yet implemented.**
-
-Cookie-based session management with configurable storage:
+Implemented as `Session` in `melian-server`:
 
 ```scala
-val app = Router.builder
-  .session(SessionConfig(
-    cookieName = "sid",
-    maxAge = 24.hours,
-    secure = true,
-    httpOnly = true,
-    sameSite = SameSite.Strict,
-    store = InMemorySessionStore(),  // or RedisSessionStore, JdbcSessionStore
-  ))
-  .get("/api/me", getMe)
-  .build
+val app = Session.middleware(Session.Config(
+  cookieName = "sid",
+  maxAge = 24.hours,
+  secure = true,
+  httpOnly = true,
+  sameSite = SameSite.Lax,
+  store = Session.InMemorySessionStore(),  // or a custom SessionStore (Redis, JDBC, ...)
+))(router.toHandler)
 ```
 
-Session data accessible in endpoints via `RequestContext`:
+Session data is accessed through the per-request handle:
 
 ```scala
-def getMe(session: Header[SessionId]): Endpoint[DomainError, Ok[User]] = {
-  val ctx = summon[RequestContext]
-  ctx.session.get[User]("user")
-    .flatMap {
-      case Some(user) => Eru.succeed(Ok(user))
-      case None => Eru.fail(DomainError.Unauthorized)
-    }
+def getMe: Endpoint[DomainError, Ok[User]] = {
+  val session = Session.current.getOrElse(Eru.fail(DomainError.Unauthorized))
+  session.getAs[User]("user")
+    .map(user => Ok(user))
+    .getOrElse(Eru.fail(DomainError.Unauthorized))
 }
 ```
 
+Values are JSON-encoded via Sarati codecs (`set`/`getAs` with `Encoder`/`Decoder`), so anything with
+derived codecs stores round-trips losslessly. Sessions are lazy: the cookie is issued exactly when
+the session is persisted (first write, or a write refreshing an existing one) or invalidated -- a
+request that never touches the session neither stores nor sends anything. A client-presented id the
+store does not know is never reused: the session is minted under a fresh id when first written
+(session-fixation hygiene). `Handle.invalidate()` drops the store entry and expires the cookie. The
+handle is scoped to the request's virtual thread (`Session.current`) rather than the
+`RequestContext`: the context is built inside the generated route closure, which runs after the
+middleware has resolved the session, and each request executes on its own virtual thread, so the
+scoping is per-request by construction.
+
 ### 14.8 Rate Limiting
 
-**Planned, not yet implemented.**
-
-Request rate limiting with configurable strategies:
+Implemented as `RateLimit` in `melian-server` (fixed window per key):
 
 ```scala
-val app = Router.builder
-  .rateLimit(RateLimitConfig(
-    limit = 100,
-    window = 1.minute,
-    keyExtractor = _.remoteAddress,   // or by API key, user ID, etc.
-    store = InMemoryRateLimitStore(), // or Redis for distributed
-  ))
-  .post("/api/users", createUser)
-  .build
+val app = RateLimit.middleware(RateLimit.Config(
+  limit = 100,
+  window = 1.minute,
+  keyExtractor = _.headers.getFirst("X-Api-Key").map(_.value).getOrElse("anonymous"),
+  store = RateLimit.InMemoryRateLimitStore(), // or a custom RateLimitStore (Redis, ...)
+))(router.toHandler)
 ```
 
-Returns 429 Too Many Requests with `Retry-After` header when limit exceeded. Uses eru-http's `Response.tooManyRequests(retryAfter, body)` factory.
+Over-limit requests answer 429 Too Many Requests with a `Retry-After` header carrying the seconds
+left in the window. The key is whatever the `keyExtractor` derives; eru-http does not expose the
+remote address on `Request` (an upstream follow-up, tracked in ROADMAP.md), so the default key is
+global and deployments should extract a client-identity value. The in-memory store bounds its key
+tracking (`maxTrackedKeys`, default 65536) and opportunistically evicts windows untouched for a full
+window, so high-cardinality keys cannot grow the map without bound.
 
 ### 14.9 Graceful Shutdown
 
-**Planned, not yet implemented** (eru-http's `HttpServer` provides graceful shutdown; a Melian wrapper around it is not yet written).
-
-Connection draining on process termination:
+Implemented as `MelianServer.start`, returning a `RunningServer` with explicit lifecycle control:
 
 ```scala
-MelianServer.start(
+val running = MelianServer.start(
   config = serverConfig,
-  app = router,
+  router = router,
   shutdown = ShutdownConfig(
-    gracePeriod = 30.seconds,     // time to finish in-flight requests
+    gracePeriod = 30.seconds,     // bound on the in-flight wait (gracefulShutdownTimeout)
     healthDuringDrain = false,    // /health returns 503 during drain
   ),
 )
+
+// later, explicitly:
+running.stop
 ```
 
-Hooks into JVM shutdown signals. Stops accepting new connections, lets in-flight requests complete (up to grace period), then shuts down. Uses Eru's structured concurrency for orderly fiber cleanup.
+A JVM shutdown hook performs the same drain on SIGTERM/SIGINT: stop accepting new connections, let
+in-flight requests complete (up to the grace period), then shut down. While draining, the health
+path answers 503 so orchestrators stop routing traffic first (`healthDuringDrain = true` leaves the
+health path untouched). `running.isDraining` exposes the state for custom readiness logic. The
+bracket-scoped `serve`/`serveWith` entry points remain the right choice when the server's lifetime
+is bounded by a resource scope.
 
 ### Design principle
 
@@ -1002,7 +1054,7 @@ Every convenience feature in this section:
 
 ### Melian + Rem
 
-The client generator is `arda_openapi`, a separate Dart project: its increment 1 (the OpenAPI 3.1 reader) is complete, and its tests pin the Melian spec shape. Melian's remaining obligation is spec compatibility, chiefly emitting a stable `operationId` per operation. Melian stays frontend-agnostic: the OpenAPI spec is the contract, and any client tooling can consume it.
+The client generator is `arda_openapi`, a separate Dart project: its increment 1 (the OpenAPI 3.1 reader) is complete, and its tests pin the Melian spec shape. Melian emits a stable `operationId` per operation: one given explicitly on the route (`get("/p", h, operationId = "getUser")`) or, when omitted, derived deterministically from the method and path template (`GET /workspaces/:workspaceId` becomes `getWorkspacesByWorkspaceId`). Melian stays frontend-agnostic: the OpenAPI spec is the contract, and any client tooling can consume it.
 
 Melian is the backend, Rem is the frontend. They share the Arda ecosystem but have zero dependency on each other.
 
@@ -1154,7 +1206,7 @@ Cross-route analysis is feasible because `Router.build` sees all routes together
 
 ### 16.4 Partial Body Decoding
 
-Implemented for `Json[A]` bodies: decode warnings surface in `RequestContext.warnings` for Endpoint handlers. The `X-Melian-Warnings` response header, and warnings for `Coded[A]`/`Form[A]` bodies, are not yet implemented.
+Implemented for all body markers: decode warnings surface in `RequestContext.warnings` for Endpoint handlers, and the `X-Melian-Warnings` response header (value: `<n> decode warning(s)`) is attached to responses when the Girdle produced any. `Coded[A]` bodies surface recovered parse/decode errors from the Rumil and Sarati stages; `Form[A]` bodies surface form keys outside the decoder's declared `FormDecoder.knownFields` (hand-written decoders opt in by declaring the fields they consume; the empty default disables the check).
 
 **Decision: Treat `Result.Partial` as success with warnings.**
 

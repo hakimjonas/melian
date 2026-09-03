@@ -20,24 +20,31 @@ import net.ghoula.valar.{ValidationResult, Validator}
   *
   * A `Coded[A]` parameter accepts `application/json`, `application/xml`, and `application/yaml`.
   * The Content-Type header selects the parse + decode path; the decoded value is then run through
-  * Valar validation, exactly like [[net.ghoula.melian.Json]].
+  * Valar validation, exactly like [[net.ghoula.melian.Json]]. Parse and decode recoveries surface
+  * as warnings on the returned [[SaratiBridge.DecodeResult]].
   */
 object CodedBody {
 
   private val codedMediaTypes: List[MediaType] =
     List(MediaType.applicationJson, MediaType.applicationXml, MediaType("application", "yaml"))
 
-  def decode[A](headers: Headers, body: Body)(using
+  /** @param strict
+    *   when true, a recovered parse or decode error rejects the request instead of surfacing as a
+    *   warning (`Strict[Coded[A]]`).
+    */
+  def decode[A](headers: Headers, body: Body, strict: Boolean = false)(using
     coded: CodedDecoder[A],
     validator: Validator[A]
-  ): Eru[RequestError, A] = {
+  ): Eru[RequestError, SaratiBridge.DecodeResult[A]] = {
     val raw = headers.contentTypeRaw.getOrElse("").toLowerCase
 
     if body.isEmpty then Eru.fail(RequestError.BodyMissing)
-    else if raw.contains("xml") then decodeParsed[A, XmlNode](body)(parseXmlRoot, xmlDepth)(coded.xml, validator)
-    else if raw.contains("yaml") then decodeParsed[A, YamlValue](body)(parseYamlRoot, yamlDepth)(coded.yaml, validator)
+    else if raw.contains("xml") then
+      decodeParsed[A, XmlNode](body, strict)(parseXmlRoot, xmlDepth)(coded.xml, validator)
+    else if raw.contains("yaml") then
+      decodeParsed[A, YamlValue](body, strict)(parseYamlRoot, yamlDepth)(coded.yaml, validator)
     else if raw.contains("json") || raw.isEmpty then
-      decodeParsed[A, JsonValue](body)(parseJsonText, jsonDepth)(coded.json, validator)
+      decodeParsed[A, JsonValue](body, strict)(parseJsonText, jsonDepth)(coded.json, validator)
     else
       Eru.fail(
         RequestError.UnsupportedMediaType(
@@ -46,7 +53,6 @@ object CodedBody {
         )
       )
   }
-
   private def parseJsonText(t: String): RumilResult[ParseError, JsonValue] = parseJson(t)
 
   private def parseXmlRoot(t: String): RumilResult[ParseError, XmlNode] =
@@ -64,15 +70,18 @@ object CodedBody {
     }
 
   private def decodeParsed[A, AST](
-    body: Body
+    body: Body,
+    strict: Boolean
   )(
     parse: String => RumilResult[ParseError, AST],
     depthOf: AST => Int
-  )(dec: Decoder[AST, A], validator: Validator[A]): Eru[RequestError, A] =
+  )(dec: Decoder[AST, A], validator: Validator[A]): Eru[RequestError, SaratiBridge.DecodeResult[A]] =
     readText(body).mapError(e => RequestError.DecodeFailed(List(e.message))).flatMap { t =>
       parse(t) match {
-        case RumilResult.Success(ast, _) => decodeGuarded(ast, dec, validator, depthOf)
-        case RumilResult.Partial(ast, _, _) => decodeGuarded(ast, dec, validator, depthOf)
+        case RumilResult.Success(ast, _) => decodeGuarded(ast, dec, validator, depthOf, Nil, strict)
+        case RumilResult.Partial(ast, parseErrors, _) =>
+          if strict then Eru.fail(RequestError.ParseFailed(parseErrors.map(_.toString)))
+          else decodeGuarded(ast, dec, validator, depthOf, parseErrors.map(e => s"parse warning: $e"), strict)
         case RumilResult.Failure(errs, _) => Eru.fail(RequestError.ParseFailed(errs.map(_.toString)))
       }
     }
@@ -81,22 +90,36 @@ object CodedBody {
     ast: AST,
     dec: Decoder[AST, A],
     validator: Validator[A],
-    depthOf: AST => Int
-  ): Eru[RequestError, A] =
+    depthOf: AST => Int,
+    priorWarnings: List[String],
+    strict: Boolean
+  ): Eru[RequestError, SaratiBridge.DecodeResult[A]] =
     if depthOf(ast) > SaratiBridge.MaxJsonDepth then
       Eru.fail(RequestError.DecodeFailed(List(s"Body nesting depth exceeds limit of ${SaratiBridge.MaxJsonDepth}")))
-    else decodeAndValidate(ast, dec, validator)
+    else decodeAndValidate(ast, dec, validator, priorWarnings, strict)
 
-  private def decodeAndValidate[A, AST](ast: AST, dec: Decoder[AST, A], validator: Validator[A]): Eru[RequestError, A] =
+  private def decodeAndValidate[A, AST](
+    ast: AST,
+    dec: Decoder[AST, A],
+    validator: Validator[A],
+    priorWarnings: List[String],
+    strict: Boolean
+  ): Eru[RequestError, SaratiBridge.DecodeResult[A]] =
     dec.decode(ast) match {
-      case SaratiResult.Success(value, _) => validate(value, validator)
-      case SaratiResult.Partial(value, _, _) => validate(value, validator)
+      case SaratiResult.Success(value, _) => validate(value, validator, priorWarnings)
+      case SaratiResult.Partial(value, decodeErrors, _) =>
+        if strict then Eru.fail(RequestError.DecodeFailed(decodeErrors.map(_.toString)))
+        else validate(value, validator, priorWarnings ++ decodeErrors.map(e => s"decode warning: $e"))
       case SaratiResult.Failure(errs, _) => Eru.fail(RequestError.DecodeFailed(errs.map(_.toString)))
     }
 
-  private def validate[A](value: A, validator: Validator[A]): Eru[RequestError, A] =
+  private def validate[A](
+    value: A,
+    validator: Validator[A],
+    warnings: List[String]
+  ): Eru[RequestError, SaratiBridge.DecodeResult[A]] =
     validator.validate(value) match {
-      case ValidationResult.Valid(v) => Eru.succeed(v)
+      case ValidationResult.Valid(v) => Eru.succeed(SaratiBridge.DecodeResult(v, warnings))
       case ValidationResult.Invalid(errs) =>
         Eru.fail(RequestError.ValidationFailed(errs.map(e => FieldError(e.fieldPath.mkString("."), e.message, e.code))))
     }

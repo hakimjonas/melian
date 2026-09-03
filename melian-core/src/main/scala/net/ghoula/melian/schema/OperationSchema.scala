@@ -17,6 +17,9 @@ final case class OperationSchema(
   responseBody: Option[TypeSchema],
   responseHeaders: Vector[ResponseHeaderSchema] = Vector.empty,
   isEventStream: Boolean,
+  isWebSocket: Boolean = false,
+  operationId: Option[String] = None,
+  responseMediaTypes: Vector[String] = Vector.empty,
   summary: Option[String] = None,
   description: Option[String] = None,
   tags: Vector[String] = Vector.empty
