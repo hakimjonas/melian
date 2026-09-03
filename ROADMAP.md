@@ -61,21 +61,29 @@ CORS, request logging, request IDs, auth, error handling, compression, and body 
 
 ## Pending
 
-### Melian release — deferred until the upstream findings land
+### Melian release — upstream landed, adoption complete (2026-09-04)
 
-Per the maintainer's decision (2026-09-03), the first public release waits until every Open item in
-`../ecosystem-findings-from-melian.md` lands upstream, so v1 ships with a zero-workaround surface:
+Every Open item in `../ecosystem-findings-from-melian.md` has landed upstream (implemented and
+tagged locally as eru-http `v1.0.0-alpha.2`; rumil's JSON entry point committed on `dtd-support`,
+to ship as the next rumil release):
 
-- eru-http: client address on `Request`; ACME → `TlsConfig`; the `Response.tooManyRequests`
-  factory; `StatusCode` constants for 406/422/426; `Response.addCookie`; the WebSocket
-  pending-handler registry audit; `CanEqual` givens next to the opaque types.
-- rumil: the lossless JSON parse entry point (unblocks melian's GreenNode/RedTree mode).
+- eru-http 1.0.0-alpha.2: client address on `Request` (attributes channel + `clientAddress` with
+  provenance); ACME → `TlsConfig` (new `eru-http-acme` module); `Response.tooManyRequests`; the
+  full RFC StatusCode registry; `Response.addCookie`; the WebSocket pending-handler registry leak
+  fix; `CanEqual` givens next to the opaque types.
+- rumil: `JsonLanguage` + `JsonLossless.parseJsonLossless` + `jsonReparseable` (unblocks melian's
+  GreenNode/RedTree mode).
 
 (Finding 6 — shutdown concurrency — was withdrawn after source review: `NativeHttpServer.shutdown`
 is CAS-guarded idempotent and the drain is tested in the hostile suite.)
 
-Melian's half of the split findings is complete (see the findings document); the interim local
-`CanEqual` givens are explicitly transitional and will be removed when eru-http ships its own.
+Melian adopted the upstream surface with the 1.0.0-alpha.2 bump: the interim `Equality.scala`
+givens are deleted, the 422/406/426 workarounds use the registry constants, `RateLimit` keys on
+the resolved client address by default and answers 429 via `tooManyRequests`, Csrf/Session issue
+cookies through `Response.addCookie`, `RequestContext` surfaces `clientAddress`, and
+`MelianServer.withAcme` (DESIGN.md 14.1) wires ACME provisioning. The `Status[Code, A]` macro-time
+status resolution remains for arbitrary registered-range literals — it is no longer a
+missing-constant workaround.
 
 Sequence when the upstream work is published:
 
@@ -91,18 +99,16 @@ safe: CI only — nothing publishes without a tag push, and tags come only from 
 
 ## Planned
 
-### Lossless parsing mode (blocked on upstream Rumil)
+### Lossless parsing mode (unblocked)
 
-DESIGN.md §5, Stage 4 describes a GreenNode/RedTree mode for editor-style endpoints (live parse feedback, incremental reparse, source-position mapping). The lossless machinery (`GreenNodeOf`, `RedTree`, `IncrementalParser`) ships in `rumil-core`, but the published JSON parser does not expose a lossless entry point; the mode needs a Rumil increment (a `Language` instance and batch lossless parse for JSON) before Melian can wire the marker and endpoint mode.
+DESIGN.md §5, Stage 4 describes a GreenNode/RedTree mode for editor-style endpoints (live parse feedback, incremental reparse, source-position mapping). Rumil now ships the JSON increment (`JsonLanguage`, `JsonLossless.parseJsonLossless`, `jsonReparseable`); the Melian-side marker and endpoint mode is the remaining feature work.
 
 ### Upstream (`eru-http`)
 
 Not Melian work; tracked here so it is not lost. The full findings -- evidence against the published
 artifacts and suggested shapes -- live in `../ecosystem-findings-from-melian.md`:
 
-- Client address on `Request`, so `RequestContext` can surface it (and `RateLimit` can default its key to the client address).
-- ACME provisioning producing `TlsConfig` (TLS is `eru-http`'s domain; DESIGN.md §14.1 sketches the API).
-- A `Response.tooManyRequests` factory, `StatusCode` constants for 406/422/426, a cookie-aware response API, a documented shutdown idempotency contract, a testable WebSocket upgrade seam, and `CanEqual` givens for the opaque types (details in the findings document).
+All landed in eru-http 1.0.0-alpha.2 (2026-09-04) — see the release-gate section above. The lossless JSON entry point landed in rumil (`JsonLossless`, branch `dtd-support`).
 
 ### Definition of done
 

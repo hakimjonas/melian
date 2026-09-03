@@ -72,10 +72,11 @@ object Csrf {
       inner(request).flatMap { response =>
         if cookieToken.isEmpty then {
           val token = newToken
-          // addHeader, not setHeader: Set-Cookie is multi-valued, and other cookie-issuing
-          // middleware (e.g. Session) may already have added one.
+          // addCookie (eru-http 1.0.0-alpha.2) appends to Set-Cookie — the one field RFC 9110
+          // Section 5.5 exempts from list combination — so other cookie-issuing middleware
+          // (e.g. Session) may add its own cookie to the same response.
           response
-            .addHeader(HeaderNames.SetCookie, issueCookie(token, config).toSetCookieHeader)
+            .addCookie(issueCookie(token, config))
             .mapError { case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
               HttpError.InvalidResponse(InvalidResponse(err.toString, "Set-Cookie header"))
             }

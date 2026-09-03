@@ -15,8 +15,8 @@ import net.ghoula.melian.WebSocketTransport
   */
 object WebSocketRoutes {
 
-  /* 426 Upgrade Required is not in eru-http's StatusCode set; the code is constant and valid. */
-  private val UpgradeRequired: StatusCode = StatusCode(426).unsafeRunSync()
+  /* 426 ships in eru-http's StatusCode registry as of 1.0.0-alpha.2. */
+  private val UpgradeRequired: StatusCode = StatusCode.UpgradeRequired
 
   private def upgradeRequiredResponse: Eru[HttpError, Response[Body]] =
     Response(UpgradeRequired, Headers.empty, Body.text("WebSocket upgrade required"))

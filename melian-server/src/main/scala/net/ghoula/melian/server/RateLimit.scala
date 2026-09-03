@@ -10,9 +10,11 @@ import net.ghoula.eru.http.*
 /** Request rate limiting over a fixed window per key.
   *
   * Each request records a hit for its key (client identity, API key, tenant -- whatever the
-  * keyExtractor derives; eru-http does not expose the remote address on `Request`, so the default
-  * key is global). Over-limit requests answer 429 Too Many Requests with a `Retry-After` header
-  * carrying the seconds left in the window.
+  * keyExtractor derives; the default keys on the resolved client address that eru-http
+  * 1.0.0-alpha.2 exposes as `Request.clientAddress`, falling back to a global key for requests
+  * without one, e.g. in tests). Over-limit requests answer 429 Too Many Requests via eru-http's
+  * `Response.tooManyRequests` factory, so the `Retry-After` header carries the seconds left in the
+  * window.
   *
   * The in-memory store is per-process; for distributed deployments implement [[RateLimitStore]]
   * against a shared backend (the trait is deliberately tiny).
@@ -81,7 +83,8 @@ object RateLimit {
   final case class Config(
     limit: Int,
     window: Duration = 1.minute,
-    keyExtractor: Request[Body] => String = (_: Request[Body]) => "global",
+    keyExtractor: Request[Body] => String = (request: Request[Body]) =>
+      request.clientAddress.fold("global")(_.hostAddress),
     store: RateLimitStore = InMemoryRateLimitStore()
   )
 
@@ -91,8 +94,11 @@ object RateLimit {
     config.store.hit(config.keyExtractor(request), config.window, config.limit) match {
       case RateLimitResult.Allowed(_) => inner(request)
       case RateLimitResult.Limited(retryAfter) =>
-        Response(StatusCode.TooManyRequests, Headers.empty, Body.text("Rate limit exceeded"))
-          .setHeader(HeaderNames.RetryAfter, retryAfter.toString)
+        // eru-http 1.0.0-alpha.2 ships the tooManyRequests factory (finding 3): it renders
+        // non-negative delay-seconds and fails on negative delays, so the error channel here
+        // widens to HttpError via the same InvalidResponse mapping.
+        Response
+          .tooManyRequests(java.time.Duration.ofSeconds(retryAfter), Body.text("Rate limit exceeded"))
           .mapError { case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
             HttpError.InvalidResponse(InvalidResponse(err.toString, "Retry-After header"))
           }

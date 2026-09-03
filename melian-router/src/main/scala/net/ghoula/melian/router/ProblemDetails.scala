@@ -14,10 +14,9 @@ object ProblemDetails {
 
   private val problemJsonMediaType: MediaType = MediaType("application", "problem+json")
 
-  /* 422 Unprocessable Content and 406 Not Acceptable are not in eru-http's StatusCode set, so they
-   * are constructed through the validating `apply` (the codes are constant and valid). */
-  private val UnprocessableContent: StatusCode = StatusCode(422).unsafeRunSync()
-  private val NotAcceptable: StatusCode = StatusCode(406).unsafeRunSync()
+  /* 422 and 406 ship in eru-http's StatusCode registry as of 1.0.0-alpha.2. */
+  private val UnprocessableContent: StatusCode = StatusCode.UnprocessableContent
+  private val NotAcceptable: StatusCode = StatusCode.NotAcceptable
 
   def render(error: RequestError): Response[Body] = {
     val (status, json) = error match {

@@ -56,7 +56,14 @@ val sharedScalacOptions: Seq[String] = Seq(
 )
 
 // ===== Dependency Versions =====
-val eruHttpVersion: String = "1.0.0-alpha.1"
+val eruHttpVersion: String = "1.0.0-alpha.2"
+
+// 1.0.0-alpha.2 is resolved from eru-http's local Ivy repository until it is published to Maven
+// Central. TEMPORARY: drop this resolver once the real release lands on Central.
+ThisBuild / resolvers += Resolver.file(
+  "eru-http-local",
+  (ThisBuild / baseDirectory).value / ".." / "eru-http" / ".ivy2" / "local"
+)(Resolver.ivyStylePatterns)
 val saratiVersion: String = "1.0.0-alpha.2"
 val rumilVersion: String = "1.0.0-alpha.3"
 val valarVersion: String = "0.6.0"
@@ -114,6 +121,9 @@ lazy val server = (project in file("melian-server"))
     scalacOptions ++= sharedScalacOptions,
     libraryDependencies ++= Seq(
       "net.ghoula" %% "eru-http-server" % eruHttpVersion,
+      // ACME provisioning (DESIGN.md Section 14.1): TLS is eru-http's domain; Melian wires the
+      // result into HttpServerConfig.withTls.
+      "net.ghoula" %% "eru-http-acme" % eruHttpVersion,
       "org.scalameta" %% "munit" % munitVersion % Test
     ),
     javaOptions ++= Seq("-XX:+UseZGC"),

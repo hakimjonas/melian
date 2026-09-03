@@ -1,5 +1,6 @@
 package net.ghoula.melian.server
 
+import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.*
 import scala.concurrent.duration.Duration
@@ -7,6 +8,7 @@ import scala.concurrent.duration.Duration
 import net.ghoula.eru.Eru
 import net.ghoula.eru.EruRuntime
 import net.ghoula.eru.http.*
+import net.ghoula.eru.http.acme.{AcmeConfig, AcmeHttp01, AcmeProvisioner}
 import net.ghoula.eru.http.server.{HttpServer, HttpServerConfig, Middleware, RequestHandler, ServerAddress}
 import net.ghoula.melian.given
 import net.ghoula.melian.router.Router
@@ -118,6 +120,82 @@ object MelianServer {
     use: HttpServer => Eru[HttpError, A]
   )(using runtime: EruRuntime): Eru[HttpError, A] =
     HttpServer.scoped(config)(middleware(router.toHandler))(use)
+
+  /** ACME settings for [[MelianServer.withAcme]] (DESIGN.md Section 14.1).
+    *
+    * @param domain
+    *   the DNS identifier to certify
+    * @param contactEmail
+    *   ACME account contact
+    * @param staging
+    *   use Let's Encrypt staging (the safe default; production rate limits are unforgiving)
+    * @param storePath
+    *   where the account key, issued material, and PKCS12 keystore persist
+    * @param http01Port
+    *   port the built-in HTTP-01 challenge listener binds (ACME validates on 80)
+    * @param directoryUrl
+    *   explicit ACME directory override (e.g. a local Pebble instance); wins over `staging`
+    */
+  final case class AcmeSettings(
+    domain: String,
+    contactEmail: String,
+    staging: Boolean = true,
+    storePath: Path,
+    http01Port: Int = 80,
+    directoryUrl: Option[String] = None,
+    keyStorePassword: String = "changeit"
+  )
+
+  /** What [[withAcme]] hands to the use-callback alongside the TLS server. */
+  final case class AcmeHandle(
+    provisioner: AcmeProvisioner,
+    responder: AcmeHttp01,
+    challengeAddress: ServerAddress
+  )
+
+  /** Serves `router` over TLS with certificates provisioned by ACME (DESIGN.md Section 14.1).
+    *
+    * Provisioning is eru-http's domain ([[AcmeProvisioner]]); Melian wires the produced `TlsConfig`
+    * into `HttpServerConfig.withTls` and runs the HTTP-01 challenge listener on `acme.http01Port`.
+    * Bracket-scoped like `serve`: both servers stop and the renewal loop ends when the scope exits.
+    * A still-valid stored certificate is reused without ACME traffic, so restarts are cheap.
+    */
+  def withAcme[A](
+    acme: AcmeSettings,
+    config: HttpServerConfig,
+    router: Router
+  )(
+    use: (HttpServer, AcmeHandle) => Eru[HttpError, A]
+  )(using runtime: EruRuntime): Eru[HttpError, A] = {
+    val responder = AcmeHttp01.create()
+    val acmeConfig = AcmeConfig(
+      domains = List(acme.domain),
+      contactEmail = acme.contactEmail,
+      staging = acme.staging,
+      directoryUrl = acme.directoryUrl,
+      storePath = acme.storePath,
+      keyStorePassword = acme.keyStorePassword,
+      http01Port = acme.http01Port
+    )
+
+    AcmeProvisioner
+      .start(acmeConfig, responder)
+      .mapError(e => HttpError.NetworkError(e.getMessage, None))
+      .flatMap { provisioner =>
+        val challengeHandler = AcmeHttp01.challengeHandler(responder)
+        val challengeConfig = HttpServerConfig(host = config.host, port = acme.http01Port)
+        HttpServer
+          .scoped(challengeConfig)(challengeHandler) { challengeServer =>
+            challengeServer.start.flatMap { challengeAddress =>
+              val tlsConfig = provisioner.tlsConfig
+              HttpServer.scoped(config.withTls(tlsConfig))(router.toHandler) { server =>
+                use(server, AcmeHandle(provisioner, responder, challengeAddress))
+              }
+            }
+          }
+          .ensure(provisioner.stop().attempt.map(_ => ()))
+      }
+  }
 
   /** Starts a server with connection draining on process termination.
     *

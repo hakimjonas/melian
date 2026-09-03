@@ -172,10 +172,11 @@ object Session {
         httpOnly = config.httpOnly,
         sameSite = Some(config.sameSite)
       )
-      // addHeader, not setHeader: Set-Cookie is multi-valued, and other cookie-issuing middleware
+      // addCookie (eru-http 1.0.0-alpha.2) appends to Set-Cookie — the one field RFC 9110
+      // Section 5.5 exempts from list combination — so other cookie-issuing middleware
       // (e.g. Csrf) may add its own cookie to the same response.
       response
-        .addHeader(HeaderNames.SetCookie, cookie.toSetCookieHeader)
+        .addCookie(cookie)
         .mapError { case err: (HeaderName.InvalidHeaderName | HeaderValue.InvalidHeaderValue) =>
           HttpError.InvalidResponse(InvalidResponse(err.toString, "Set-Cookie header"))
         }
