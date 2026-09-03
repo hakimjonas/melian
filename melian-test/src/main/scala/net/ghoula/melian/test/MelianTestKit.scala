@@ -3,8 +3,15 @@ package net.ghoula.melian.test
 import parser.core.Result as RumilResult
 import parsers.json.parseJson
 
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+
 import net.ghoula.eru.Eru
+import net.ghoula.eru.EruRuntime
 import net.ghoula.eru.http.*
+import net.ghoula.eru.http.client.{WebSocketClient, WebSocketClientConfig, WebSocketConnection}
+import net.ghoula.eru.http.server.{HttpServer, HttpServerConfig}
+import net.ghoula.eru.http.websocket.WebSocketError
 import net.ghoula.melian.router.Router
 import net.ghoula.sarati.ast.json.JsonValue
 
@@ -87,5 +94,52 @@ object MelianTestKit {
         case RumilResult.Partial(json, _, _) => Some(json)
         case RumilResult.Failure(_, _) => None
       }
+    }
+
+  /** Sends a POST with an `application/x-www-form-urlencoded` body built from `fields` (values are
+    * percent-encoded with form semantics), for exercising [[net.ghoula.melian.Form]] routes.
+    */
+  def postForm(router: Router, path: String, fields: (String, String)*): Response[Body] = {
+    val body = fields.map { case (name, value) =>
+      s"${URLEncoder.encode(name, StandardCharsets.UTF_8)}=${URLEncoder.encode(value, StandardCharsets.UTF_8)}"
+    }
+      .mkString("&")
+    send(
+      router,
+      Method.POST,
+      path,
+      body = Body.text(body, MediaType("application", "x-www-form-urlencoded"))
+    )
+  }
+
+  /** Runs `router` on a live `HttpServer` bound to an ephemeral localhost port, connects a
+    * WebSocket client to `path`, and hands the connection to `use` — the fastest way to exercise a
+    * compiled [[net.ghoula.melian.WebSocketEndpoint]] end-to-end, over the real upgrade path.
+    *
+    * WebSocket errors from `use` or the connection are surfaced as `HttpError.ProtocolError`
+    * carrying the original error's message.
+    */
+  def websocket[A](
+    router: Router,
+    path: String,
+    headers: List[(String, String)] = Nil
+  )(use: WebSocketConnection => Eru[WebSocketError | HttpError, A])(using
+    runtime: EruRuntime
+  ): Eru[HttpError, A] =
+    HttpServer.scoped(HttpServerConfig.localhost.withPort(0))(router.toHandler) { server =>
+      for {
+        address <- server.start
+        uri <- Uri.parse(s"ws://${address.host}:${address.port}$path").mapError(e => HttpError.InvalidUri(e): HttpError)
+        clientHeaders <- headers
+          .foldLeft[Eru[HttpError, Headers]](Eru.succeed(Headers.empty)) { case (acc, (name, value)) =>
+            acc.flatMap(
+              _.add(name, value).mapError(e => HttpError.InvalidRequest(InvalidRequest(e.toString, "header")))
+            )
+          }
+        result <- WebSocketClient.scoped(uri, WebSocketClientConfig.default, clientHeaders)(use).mapError {
+          case e: WebSocketError => HttpError.ProtocolError(e.toString, "websocket"): HttpError
+          case e: HttpError => e
+        }
+      } yield result
     }
 }

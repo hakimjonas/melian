@@ -78,6 +78,50 @@ val create: Json[CreateUser] => Eru[Nothing, Created[CreateUser]] =
 
 A `Coded[A]` body accepts JSON, XML, and YAML and dispatches on `Content-Type`. A `Form[A]` body decodes `application/x-www-form-urlencoded`; derive `FormDecoder.derived` for case classes.
 
+## Beyond hello world
+
+**WebSockets** are typed sessions. The upgrade request's parameters go through the same extraction pipeline, inbound messages are decoded and validated (a rejected message closes the connection with 1003), and outbound messages are encoded to JSON text frames:
+
+```scala
+case class ClientMsg(text: String)
+case class ServerMsg(reply: String)
+// given Decoder[JsonValue, ClientMsg], Validator[ClientMsg], Encoder[ServerMsg, JsonValue]
+
+val live: Path[String] => WebSocketEndpoint[ClientMsg, ServerMsg] =
+  (room: Path[String]) => session =>
+    for {
+      msg <- session.receive()
+      _ <- session.send(ServerMsg(s"[$room] ${msg.text}"))
+    } yield ()
+
+Router.builder.websocket("/ws/:room", live)
+```
+
+**Content negotiation**: declare a `Header[Accept]` parameter and provide the encoders you support; the response format is selected per RFC 9110 q-values (JSON is the baseline, XML and YAML are opt-in, no match answers 406):
+
+```scala
+given Encoder[Report, net.ghoula.sarati.ast.xml.XmlNode] = Encoder.derived // adds application/xml
+
+val report: (Path[UUID], Header[Accept]) => Eru[Nothing, Ok[Report]] =
+  (id, accept) => Eru.succeed(Ok(buildReport(id)))
+```
+
+**Protocol-correct wrappers**: `Unauthorized[A]` emits `WWW-Authenticate`, `TooManyRequests[A]` emits `Retry-After`, and `Status[Code, A]` serves any other body-carrying status via a phantom literal that the compiler validates:
+
+```scala
+val deny: Header[BearerToken] => Eru[Nothing, Unauthorized[String]] =
+  _ => Eru.succeed(Unauthorized("Bearer realm=\"api\"", "denied"))
+```
+
+**Cross-cutting middleware** composes at the eru-http level and wraps the router via `MelianServer.serveWith`:
+
+```scala
+import net.ghoula.melian.server.{Csrf, RateLimit}
+
+val app = Csrf.middleware() andThen RateLimit.middleware(RateLimit.Config(limit = 100))
+MelianServer.serveWith(router, app) { server => server.start.map(println) }
+```
+
 ## Modules
 
 | Module | Purpose |

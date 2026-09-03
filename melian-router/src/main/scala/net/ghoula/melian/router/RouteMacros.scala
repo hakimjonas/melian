@@ -143,6 +143,15 @@ object RouteMacros {
         val summonedErrorRenderer = Expr.summon[net.ghoula.melian.ErrorRenderer[e]]
 
         val handlerExpr: Expr[HandlerFn] = '{
+          // Status[Code, A] routes resolve their phantom code once, at route construction; the
+          // macro validated it at compile time, so this cannot fail. Other routes carry None.
+          val hoistedStatus: Option[net.ghoula.eru.http.StatusCode] = ${
+            customStatusCode match {
+              case Some(code) =>
+                '{ Some(net.ghoula.eru.http.StatusCode(${ Expr(code) }).unsafeRunSync()) }
+              case None => '{ None }
+            }
+          }
           (request: net.ghoula.eru.http.Request[net.ghoula.eru.http.Body], pathParams: Map[String, String]) =>
             ${
               // Build typed extractions: store Type[a] (crosses quote boundaries) not TypeRepr.
@@ -177,7 +186,7 @@ object RouteMacros {
                               summonedErrorRenderer,
                               bodyEncoderExpr,
                               negotiatorExpr,
-                              customStatusCode,
+                              'hoistedStatus,
                               returnsEndpoint,
                               isEventStream,
                               'request,
@@ -201,7 +210,7 @@ object RouteMacros {
                               summonedErrorRenderer,
                               bodyEncoderExpr,
                               negotiatorExpr,
-                              customStatusCode,
+                              'hoistedStatus,
                               returnsEndpoint,
                               isEventStream,
                               'request,
@@ -242,7 +251,7 @@ object RouteMacros {
                       summonedErrorRenderer,
                       bodyEncoderExpr,
                       negotiatorExpr,
-                      customStatusCode,
+                      'hoistedStatus,
                       returnsEndpoint,
                       isEventStream,
                       'request,
@@ -418,7 +427,7 @@ object RouteMacros {
     summonedErrorRenderer: Option[Expr[net.ghoula.melian.ErrorRenderer[E]]],
     bodyEncoder: Option[Expr[net.ghoula.eru.http.BodyEncoder[B]]],
     negotiator: Option[Expr[ResponseNegotiator[B]]],
-    customStatusCode: Option[Int],
+    hoistedStatus: Expr[Option[net.ghoula.eru.http.StatusCode]],
     returnsEndpoint: Boolean,
     isEventStream: Boolean,
     request: Expr[net.ghoula.eru.http.Request[net.ghoula.eru.http.Body]],
@@ -465,10 +474,7 @@ object RouteMacros {
         case Some(n) => '{ Some($n) }
         case None => '{ None }
       }
-      val statusExpr: Expr[Int] = customStatusCode match {
-        case Some(code) => Expr(code)
-        case None => Expr(0)
-      }
+
       '{
         $eruExpr.attempt.flatMap {
           case net.ghoula.eru.Result.Success(response) =>
@@ -476,7 +482,7 @@ object RouteMacros {
               response,
               $enc,
               $neg,
-              $statusExpr,
+              $hoistedStatus,
               $pathTemplateExpr,
               $pathParams,
               $warnings,
@@ -1069,7 +1075,7 @@ object RouteMacros {
     response: R,
     encoder: Option[net.ghoula.eru.http.BodyEncoder[B]],
     negotiator: Option[ResponseNegotiator[B]],
-    customStatusCode: Int,
+    hoistedStatus: Option[net.ghoula.eru.http.StatusCode],
     pathTemplate: String,
     pathParams: Map[String, String],
     warnings: List[String],
@@ -1174,9 +1180,9 @@ object RouteMacros {
             }
         }
       case custom: net.ghoula.melian.Status[Int @unchecked, B @unchecked] =>
-        // The code is validated at compile time (SchemaGen.responseStatusCode); the runtime
-        // conversion cannot fail.
-        val status: StatusCode = StatusCode(customStatusCode).unsafeRunSync()
+        // The macro validated the phantom code at compile time and resolved the StatusCode once
+        // at route construction; Some is guaranteed exactly for Status routes.
+        val status: StatusCode = hoistedStatus.get
         encodeBody(custom.body).flatMap(body => withContentType(Response(status, Headers.empty, body), body))
       case seeOther: net.ghoula.melian.SeeOther =>
         Response(StatusCode.SeeOther, Headers.empty, Body.Empty)

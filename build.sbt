@@ -126,6 +126,9 @@ lazy val testKit = (project in file("melian-test"))
     name := "melian-test",
     scalacOptions ++= sharedScalacOptions,
     libraryDependencies ++= Seq(
+      // The websocket helper runs a live server and drives it with eru-http's own client.
+      "net.ghoula" %% "eru-http-server" % eruHttpVersion,
+      "net.ghoula" %% "eru-http-client" % eruHttpVersion,
       "org.scalameta" %% "munit" % munitVersion % Test
     ),
     javaOptions ++= Seq("-XX:+UseZGC"),

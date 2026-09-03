@@ -28,13 +28,14 @@ First public release. Five modules: `melian-core`, `melian-router`, `melian-open
 - `Coded[A]` content-type dispatch across JSON, XML, and YAML; `CodedDecoder.derived` and `FormDecoder.derived` for case classes.
 - Decode warnings for `Json[A]` bodies, surfaced through `RequestContext.warnings` for Endpoint handlers.
 - Middleware for static files (with ETag and `If-None-Match`/`If-Modified-Since` conditional requests), security headers, error pages, and health/readiness endpoints.
-- `MelianTestKit` for exercising routers without a running server.
+- `MelianTestKit` for exercising routers without a running server, plus `postForm` (form-encoded POSTs) and `websocket` (end-to-end testing of compiled WebSocket routes over a real socket) helpers.
 - `CanEqual` instances for eru-http's `Method`, `MediaType`, and `SameSite`, so endpoints compiled with `-language:strictEquality` compare them directly (transitional: withdrawn once eru-http ships its own).
 - A micro-benchmark (`RouterBenchmark`) comparing dispatch against a raw `eru-http` handler.
 
 ### Changed
 
 - A handler whose error type has no `ErrorRenderer` given in scope no longer fails compilation outright: the route resolves through the builder-level renderer (if one is active) and then the built-in problem-details 500 fallback. Endpoints that previously relied on the compile error to surface a missing renderer should rely on a given or a builder-level renderer as before.
+- `Status[Code, A]` routes resolve their status code once at route construction instead of on every request.
 - Content-negotiation tie-breaking is RFC 9110 §12.5.2-exact: among entries sharing the best q-value, a more specific media range (`type/subtype`) now beats a less specific one (`type/*`, `*/*`); the server's preference order decides only after specificity. Entries with `q=0` are unacceptable and answer 406 instead of being served.
 - Sessions are lazy: the session cookie is issued exactly when the session is persisted (first write) or invalidated; a request that never touches the session neither stores nor sends anything. A client-presented id the store does not know is never reused -- the session is minted under a fresh id when first written (session-fixation hygiene).
 
