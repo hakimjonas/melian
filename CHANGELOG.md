@@ -29,6 +29,7 @@ First public release. Five modules: `melian-core`, `melian-router`, `melian-open
 - Decode warnings for `Json[A]` bodies, surfaced through `RequestContext.warnings` for Endpoint handlers.
 - Middleware for static files (with ETag and `If-None-Match`/`If-Modified-Since` conditional requests), security headers, error pages, and health/readiness endpoints.
 - `MelianTestKit` for exercising routers without a running server.
+- `CanEqual` instances for eru-http's `Method`, `MediaType`, and `SameSite`, so endpoints compiled with `-language:strictEquality` compare them directly (transitional: withdrawn once eru-http ships its own).
 - A micro-benchmark (`RouterBenchmark`) comparing dispatch against a raw `eru-http` handler.
 
 ### Changed

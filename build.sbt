@@ -86,6 +86,8 @@ lazy val router = (project in file("melian-router"))
       "net.ghoula" %% "valar-core" % valarVersion,
       // WebSocket routes perform the RFC 6455 upgrade through eru-http's server runtime.
       "net.ghoula" %% "eru-http-server" % eruHttpVersion,
+      // End-to-end WebSocket tests drive a live server with eru-http's own client.
+      "net.ghoula" %% "eru-http-client" % eruHttpVersion % Test,
       "org.scalameta" %% "munit" % munitVersion % Test
     ),
     javaOptions ++= Seq("-XX:+UseZGC"),

@@ -61,12 +61,33 @@ CORS, request logging, request IDs, auth, error handling, compression, and body 
 
 ## Pending
 
-### Melian release
+### Melian release — deferred until the upstream findings land
 
-1. Create the GitHub repository and push `main`.
-2. Cut `v1.0.0-alpha`; the release workflow publishes `melian-core`, `melian-router`, `melian-openapi`, `melian-server`, and `melian-test`.
+Per the maintainer's decision (2026-09-03), the first public release waits until every Open item in
+`../ecosystem-findings-from-melian.md` lands upstream, so v1 ships with a zero-workaround surface:
 
-Once the remote exists, the auto-tag workflow cuts an alpha tag per merged PR, so releases after the first are automatic.
+- eru-http: client address on `Request`; ACME → `TlsConfig`; the `Response.tooManyRequests`
+  factory; `StatusCode` constants for 406/422/426; `Response.addCookie`; the WebSocket
+  pending-handler registry audit; `CanEqual` givens next to the opaque types.
+- rumil: the lossless JSON parse entry point (unblocks melian's GreenNode/RedTree mode).
+
+(Finding 6 — shutdown concurrency — was withdrawn after source review: `NativeHttpServer.shutdown`
+is CAS-guarded idempotent and the drain is tested in the hostile suite.)
+
+Melian's half of the split findings is complete (see the findings document); the interim local
+`CanEqual` givens are explicitly transitional and will be removed when eru-http ships its own.
+
+Sequence when the upstream work is published:
+
+1. Bump pins, adopt the new APIs, drop the workarounds; `sbt check` + full tests.
+2. Re-cut `v1.0.0-alpha` on the final commit and push it (the earlier tag and its failed release run
+   were removed — nothing was ever published, so the version name is clean).
+3. Set `SONATYPE_USERNAME`/`SONATYPE_PASSWORD`; `release.yml` tests and publishes.
+4. Set `RELEASE_TOKEN` last: from that moment any merged PR auto-cuts the next alpha tag and
+   auto-publishes.
+
+PGP secrets are already configured on the repository. While waiting, direct pushes to `main` are
+safe: CI only — nothing publishes without a tag push, and tags come only from the sequence above.
 
 ## Planned
 

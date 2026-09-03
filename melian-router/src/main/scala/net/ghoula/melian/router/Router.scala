@@ -3,6 +3,7 @@ package net.ghoula.melian.router
 import net.ghoula.eru.Eru
 import net.ghoula.eru.http.*
 import net.ghoula.melian.RequestError
+import net.ghoula.melian.given
 
 /** Compiled router that dispatches HTTP requests via a segment trie.
   *
@@ -35,7 +36,7 @@ final class Router private[router] (
             case e => HttpError.ProtocolError(e.toString, "unexpected")
           }
           .flatMap { response =>
-            if request.method.value == Method.HEAD.value then stripBody(response)
+            if request.method == Method.HEAD then stripBody(response)
             else Eru.succeed(response)
           }
     }

@@ -8,6 +8,7 @@ import net.ghoula.eru.Eru
 import net.ghoula.eru.EruRuntime
 import net.ghoula.eru.http.*
 import net.ghoula.eru.http.server.{HttpServer, HttpServerConfig, Middleware, RequestHandler, ServerAddress}
+import net.ghoula.melian.given
 import net.ghoula.melian.router.Router
 
 /** Draining behaviour for [[MelianServer.start]]. */
@@ -50,8 +51,10 @@ final class RunningServer private[server] (
   def isRunning: Boolean = server.isRunning
 
   /** Begins draining (health flips to 503 unless configured otherwise), stops accepting new
-    * connections, and waits for in-flight requests up to the grace period. Idempotent via the
-    * server's own shutdown semantics.
+    * connections, and waits for in-flight requests up to the grace period. Safe to call more than
+    * once and from concurrent paths (an explicit stop racing the JVM shutdown hook):
+    * `NativeHttpServer.shutdown` guards its teardown with `running.compareAndSet(true, false)`, so
+    * exactly one caller performs it and the rest return immediately.
     */
   def stop: Eru[HttpError, Unit] =
     Eru.succeed {
@@ -133,7 +136,7 @@ object MelianServer {
       if shutdown.healthDuringDrain then baseHandler
       else
         (request: Request[Body]) =>
-          if draining.get() && request.method.value == "GET" && request.uri.path == shutdown.healthPath then
+          if draining.get() && request.method == Method.GET && request.uri.path == shutdown.healthPath then
             Eru.succeed(Response(StatusCode.ServiceUnavailable, Headers.empty, Body.text("draining")))
           else baseHandler(request)
 
