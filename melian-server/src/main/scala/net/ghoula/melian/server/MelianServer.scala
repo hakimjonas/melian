@@ -10,7 +10,6 @@ import net.ghoula.eru.EruRuntime
 import net.ghoula.eru.http.*
 import net.ghoula.eru.http.acme.{AcmeConfig, AcmeHttp01, AcmeProvisioner}
 import net.ghoula.eru.http.server.{HttpServer, HttpServerConfig, Middleware, RequestHandler, ServerAddress}
-import net.ghoula.melian.given
 import net.ghoula.melian.router.Router
 
 /** Draining behaviour for [[MelianServer.start]]. */

@@ -57,15 +57,8 @@ val sharedScalacOptions: Seq[String] = Seq(
 
 // ===== Dependency Versions =====
 val eruHttpVersion: String = "1.0.0-alpha.2"
-
-// 1.0.0-alpha.2 is resolved from eru-http's local Ivy repository until it is published to Maven
-// Central. TEMPORARY: drop this resolver once the real release lands on Central.
-ThisBuild / resolvers += Resolver.file(
-  "eru-http-local",
-  (ThisBuild / baseDirectory).value / ".." / "eru-http" / ".ivy2" / "local"
-)(Resolver.ivyStylePatterns)
 val saratiVersion: String = "1.0.0-alpha.2"
-val rumilVersion: String = "1.0.0-alpha.3"
+val rumilVersion: String = "1.0.0-alpha.5"
 val valarVersion: String = "0.6.0"
 val munitVersion: String = "1.3.5"
 

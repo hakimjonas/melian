@@ -3,7 +3,6 @@ package net.ghoula.melian.router
 import net.ghoula.eru.Eru
 import net.ghoula.eru.http.*
 import net.ghoula.melian.RequestError
-import net.ghoula.melian.given
 
 /** Compiled router that dispatches HTTP requests via a segment trie.
   *
