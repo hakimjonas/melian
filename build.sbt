@@ -149,7 +149,7 @@ lazy val docTool = project
     scalacOptions ++= sharedScalacOptions,
     publish / skip := true,
     libraryDependencies ++= Seq(
-      "org.scalameta" %% "scalameta" % "4.14.2",
+      "org.scalameta" %% "scalameta" % "4.17.3",
       "org.scalatest" %% "scalatest" % "3.2.20" % Test
     ),
     Compile / run / mainClass := Some("net.ghoula.melian.doctool.DocCoverageMain")
