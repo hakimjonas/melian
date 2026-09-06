@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **License** — moved from GPL-3.0-or-later to LGPL-3.0-or-later across the LICENSE file,
+  build metadata, and documentation. LGPL keeps the copyleft protection of the source while
+  permitting applications to link and use the framework without license obligations on
+  application code.
+
 ## [1.0.0-alpha] - 2026-09
 
 First public release. Five modules: `melian-core`, `melian-router`, `melian-openapi`, `melian-server`, `melian-test`.

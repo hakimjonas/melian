@@ -5,7 +5,7 @@ ThisBuild / versionScheme := Some("early-semver")
 ThisBuild / semanticdbEnabled := true
 ThisBuild / semanticdbVersion := scalafixSemanticdb.revision
 
-ThisBuild / licenses := Seq("GPL-3.0-or-later" -> url("https://www.gnu.org/licenses/gpl-3.0.txt"))
+ThisBuild / licenses := Seq("LGPL-3.0-or-later" -> url("https://www.gnu.org/licenses/lgpl-3.0.txt"))
 ThisBuild / homepage := Some(url("https://github.com/hakimjonas/melian"))
 ThisBuild / description := "A zero-reflection, compile-time web framework for Scala 3 built on the Arda ecosystem"
 ThisBuild / developers := List(

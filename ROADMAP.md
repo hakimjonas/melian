@@ -4,7 +4,7 @@ Single source of truth for Melian's state and plan. Supersedes the old `NEXT_SES
 
 ## Current state (2026-09)
 
-The Arda ecosystem is published to Maven Central under `net.ghoula`, GPL-3.0-or-later, on GitHub with branch protection:
+The Arda ecosystem is published to Maven Central under `net.ghoula`, LGPL-3.0-or-later, on GitHub with branch protection:
 
 | Library | Version | Purpose |
 |---------|---------|---------|
@@ -19,7 +19,7 @@ Melian is part of the same ecosystem but not released:
 - Dependencies resolve the published artifacts: `eru-http-server` and `eru-http-acme` at 1.0.0-alpha.2, `sarati` at 1.0.0-alpha.2, `rumil-parsers` at 1.0.0-alpha.5; `valar-core` at 0.6.0; `munit` at 1.3.5.
 - Toolchain: sbt 2.0.7, Scala 3.8.4, JDK 25.
 - Publishing is configured for Maven Central (`localStaging` + `sonaRelease`, signed by sbt-pgp); no tag is currently cut. (An earlier `v1.0.0-alpha` tag was cut at `2cfb08a` and removed along with its failed release run — nothing was ever published, so the version name is clean.)
-- `main` branch, GPL-3.0-or-later license, GitHub workflows, and governance files are in place. Remote: `git@github.com:hakimjonas/melian.git`; CI runs on `main` pushes.
+- `main` branch, LGPL-3.0-or-later license, GitHub workflows, and governance files are in place. Remote: `git@github.com:hakimjonas/melian.git`; CI runs on `main` pushes.
 - Documentation: `README.md` (overview and quickstart), `DESIGN.md` (architecture, with the remaining planned sections marked), `CHANGELOG.md`, and this roadmap.
 - All modules compile under `-Werror`; the test suite passes (`sbt testAll` forces a full run — sbt 2 caches plain `test`).
 - Scaladoc coverage is ratcheted by `sbt check` against the checked-in `doc-coverage.json` (the Vairë documentation standard): every public member needs a `/** */` doc, and coverage may only improve.
