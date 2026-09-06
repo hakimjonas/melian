@@ -60,8 +60,8 @@ val sharedScalacOptions: Seq[String] = Seq(
 
 // ===== Dependency Versions =====
 val eruHttpVersion: String = "1.0.0-alpha.4"
-val saratiVersion: String = "1.0.0-alpha.3"
-val rumilVersion: String = "1.0.0-alpha.9"
+val saratiVersion: String = "1.0.0-alpha.4"
+val rumilVersion: String = "1.0.0-alpha.10"
 val valarVersion: String = "0.6.0"
 val munitVersion: String = "1.3.5"
 
