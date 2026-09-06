@@ -363,7 +363,7 @@ object RouteMacros {
           tpe match {
             case '[SaratiBridge.DecodeResult[inner]] =>
               '{
-                val net.ghoula.eru.Result.Success(v) = ($resultExpr: @unchecked)
+                val net.ghoula.eru.Result.Success(v) = $resultExpr.runtimeChecked
                 v.asInstanceOf[SaratiBridge.DecodeResult[inner]].value // scalafix:ok DisableSyntax.asInstanceOf
               }
             case '[a] =>
@@ -375,10 +375,10 @@ object RouteMacros {
               // erase-then-recover-by-carried-Type pattern as Valar's named-tuple
               // productElement access. This block is spliced only into the branch
               // where every extraction already succeeded, so the Success pattern
-              // is irrefutable by construction: an @unchecked binding states that
-              // (no throw), and a MatchError would only surface a broken invariant.
+              // is irrefutable by construction: the runtimeChecked binding states
+              // that (no throw), and a MatchError would only surface a broken invariant.
               '{
-                val net.ghoula.eru.Result.Success(v) = ($resultExpr: @unchecked)
+                val net.ghoula.eru.Result.Success(v) = $resultExpr.runtimeChecked
                 v.asInstanceOf[a] // scalafix:ok DisableSyntax.asInstanceOf
               }
           }
@@ -389,7 +389,7 @@ object RouteMacros {
             case '[SaratiBridge.DecodeResult[inner]] =>
               List(
                 '{
-                  val net.ghoula.eru.Result.Success(v) = ($resultExpr: @unchecked)
+                  val net.ghoula.eru.Result.Success(v) = $resultExpr.runtimeChecked
                   v.asInstanceOf[SaratiBridge.DecodeResult[inner]].warnings // scalafix:ok DisableSyntax.asInstanceOf
                 }
               )
