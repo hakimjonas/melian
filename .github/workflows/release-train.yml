@@ -1,0 +1,88 @@
+name: Release train
+
+# Scheduled batch releases: everything merged to main since the last tag ships
+# together, on the cadence dial (RELEASE_CADENCE_DAYS repo variable, default 7
+# days). workflow_dispatch is the fast path for hotfixes — it skips the cadence
+# and quiet checks and releases main immediately. Stable releases stay manual.
+on:
+  schedule:
+    - cron: "0 16 * * 0"   # Sundays 16:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Cut the next alpha tag
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          CADENCE_DAYS: ${{ vars.RELEASE_CADENCE_DAYS || '7' }}
+        run: |
+          latest=$(git ls-remote --tags --sort=-v:refname origin 'refs/tags/v*' \
+            | grep -v '\^{}' | head -n 1 | sed 's|.*refs/tags/||')
+
+          if [ -z "$latest" ]; then
+            echo "No version tags yet — the first release is tagged manually."
+            exit 0
+          fi
+
+          # Quiet period: nothing to ship.
+          count=$(git rev-list "v${latest}..HEAD" --count)
+          if [ "$count" -eq 0 ]; then
+            echo "No commits since ${latest} — nothing to release."
+            exit 0
+          fi
+
+          # Cadence gate (skipped on manual dispatch — the fast path).
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            tag_epoch=$(git log -1 --format=%ct "v${latest}")
+            now=$(date +%s)
+            days=$(( (now - tag_epoch) / 86400 ))
+            if [ "$days" -lt "$CADENCE_DAYS" ]; then
+              echo "Last release was ${days}d ago (cadence ${CADENCE_DAYS}d) — skipping."
+              exit 0
+            fi
+          fi
+
+          # Never double-tag a commit.
+          if git describe --tags --exact-match HEAD >/dev/null 2>&1; then
+            echo "HEAD is already tagged — nothing to do."
+            exit 0
+          fi
+
+          body="${latest#v}"
+          case "$body" in
+            *-alpha.*)
+              base="${body%-alpha.*}"
+              n="${body##*-alpha.}"
+              next="${base}-alpha.$((n + 1))"
+              ;;
+            *-alpha)
+              next="${body}.1"
+              ;;
+            *)
+              echo "Latest tag ${latest} is not an alpha pre-release — skipping."
+              exit 0
+              ;;
+          esac
+          newtag="v${next}"
+
+          if git ls-remote --tags origin "refs/tags/${newtag}" | grep -q "refs/tags/${newtag}$"; then
+            echo "Tag ${newtag} already exists — nothing to do."
+            exit 0
+          fi
+
+          git config user.name "arda-release-bot"
+          git config user.email "release@ghoula.net"
+          git tag "${newtag}"
+          git push "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${newtag}"
+
+          echo "Pushed ${newtag} with ${count} new commit(s) — release.yml will build, test, and publish."
