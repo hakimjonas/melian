@@ -1,0 +1,19 @@
+# Dependabot: the Arda dependency-chain manager.
+#
+# Own artifacts (net.ghoula) are excluded from the cooldown so sibling releases
+# trickle downstream immediately; external dependencies wait out a 7-day
+# cooldown (default is 3). All net.ghoula bumps are grouped into one PR.
+version: 2
+updates:
+  - package-ecosystem: "sbt"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    groups:
+      arda-ecosystem:
+        patterns:
+          - "net.ghoula:*"
+    cooldown:
+      default-days: 7
+      exclude:
+        - "net.ghoula:*"
