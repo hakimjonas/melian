@@ -163,4 +163,4 @@ sbt docCoverageSnapshot    # regenerate the baseline after intentional doc work
 
 ## License
 
-GPL-3.0-or-later.
+LGPL-3.0-or-later.
