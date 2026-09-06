@@ -8,6 +8,9 @@ ThisBuild / semanticdbVersion := scalafixSemanticdb.revision
 ThisBuild / licenses := Seq("LGPL-3.0-or-later" -> url("https://www.gnu.org/licenses/lgpl-3.0.txt"))
 ThisBuild / homepage := Some(url("https://github.com/hakimjonas/melian"))
 ThisBuild / description := "A zero-reflection, compile-time web framework for Scala 3 built on the Arda ecosystem"
+// Validate quotes/splices at expansion time: the test suites exercise every RouteMacros
+// expansion, so ill-typed trees surface in CI, not at user sites.
+ThisBuild / Test / scalacOptions += "-Xcheck-macros"
 ThisBuild / developers := List(
   Developer(
     id = "hakimjonas",
