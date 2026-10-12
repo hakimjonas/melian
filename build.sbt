@@ -1,4 +1,4 @@
-ThisBuild / scalaVersion := "3.9.0"
+ThisBuild / scalaVersion := "3.10.0"
 ThisBuild / organization := "net.ghoula"
 ThisBuild / organizationName := "Hakim Jonas Ghoula"
 ThisBuild / versionScheme := Some("early-semver")
