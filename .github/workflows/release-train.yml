@@ -19,6 +19,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
 
       - name: Cut the next alpha tag
@@ -26,8 +27,9 @@ jobs:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           CADENCE_DAYS: ${{ vars.RELEASE_CADENCE_DAYS || '7' }}
         run: |
+          # Keep the version without the leading "v"; every use below re-adds it.
           latest=$(git ls-remote --tags --sort=-v:refname origin 'refs/tags/v*' \
-            | grep -v '\^{}' | head -n 1 | sed 's|.*refs/tags/||')
+            | grep -v '\^{}' | head -n 1 | sed 's|.*refs/tags/v||')
 
           if [ -z "$latest" ]; then
             echo "No version tags yet — the first release is tagged manually."
