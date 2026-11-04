@@ -9,6 +9,10 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    ignore:
+      - dependency-name: "org.scala-lang:scala3-library_3"
+        versions:
+          - "[3.10.0-RC1,)"
     groups:
       arda-ecosystem:
         patterns:
